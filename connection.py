@@ -204,12 +204,11 @@ class SecureConnection:
             except socket.timeout:
                 continue
             except Exception as e:
-                print(f"Error handling client: {e}")
                 current_client.socket.close()
                 self.clients.remove(current_client)
-                print("Client disconnected.")
+                print(f"Client {current_client.ip}:{current_client.port} disconnected.")
                 break
-        print("Client handler stopped.")
+        print(f"Client {current_client.ip}:{current_client.port} handler stopped.")
                 
     def key_derivation(self, main_key:bytes) -> tuple[bytes, bytes]:
         salt = self.server_salt + self.client_salt  # Ensure fixed lengths for salts
