@@ -1,4 +1,5 @@
 import socket
+import threading
 from Crypto.PublicKey import RSA
 from Crypto.Cipher import PKCS1_OAEP # for RSA encryption/decryption
 from Crypto.Cipher import AES # for after the RSA key exchange
@@ -117,22 +118,53 @@ class SecureConnection:
             self.socket.close()
         self.socket = None
 
-    def start_server(self) -> None:
+    def start_server(self, thread=False) -> None:
         """Start the server."""
+        socket.setdefaulttimeout(1)  # set a timeout for the socket to avoid blocking
         self.socket = socket.create_server((self.host, self.port))
         if not self.private_key:
             self.generate_rsa_key()   
         print(f"Server started at {self.host}:{self.port}")
-        self.is_server = True 
-        
-    def accept_client(self) -> None:
+        self.socket.listen(5)
+        self.is_server = True
+        if thread:
+            server_thread = threading.Thread(target=self.client_manager)
+            server_thread.start()
+        self.accept_client()  # accept the first client connection immediately after starting the server
+                    
+    def client_manager(self) -> None:
+        """Manage client connections."""
+        if not self.is_server:
+            print("Server is not running.")
+            return
+        while True and self.is_server:
+            try:
+                self.accept_client(thread=True)  # accept a client connection
+                if self.verbose: print(f"Client connected: {self.clients[-1]}")
+            except socket.timeout:
+                continue
+            except KeyboardInterrupt:
+                break
+            except Exception as e:
+                print(f"Error accepting client: {e}")
+                break
+        print("Client manager stopped.")
+     
+    def accept_client(self, thread=False) -> None:
         """Accept a client connection."""
         if not self.is_server:
             print("Server is not running.")
             return
         
         #---- accept a client connection ----
-        client_socket, addr = self.socket.accept() # accept the client connection
+        try:
+            client_socket, addr = self.socket.accept() # accept the client connection
+        except socket.timeout:
+            return
+        except:
+            print("Error accepting client connection.")
+            return
+        
         print(f"Connection accepted from {addr}")
         current_client = Client(client_socket)  # create a client object
         self.clients.append(current_client)  # add the client socket to the list of client sockets
@@ -151,12 +183,35 @@ class SecureConnection:
         if self.verbose: print(f"Received client salt: {self.client_salt.hex()}")
         
         # ---- key derivation ----
-        self.key_derivation(main_key)  # derive a key from the AES key and server's salt
-        current_client.aes_key = self.aes_key
-        current_client.hmac_key = self.hmac_key
+        
+        current_client.aes_key, current_client.hmac_key = self.key_derivation(main_key)  # derive a key from the AES key and server's salt
+        # Start a new thread to handle the client
+        if thread:
+            client_thread = threading.Thread(target=self.handle_client, args=(current_client,))
+            client_thread.start()
         return
 
-    def key_derivation(self, main_key:bytes) -> bytes:
+    def handle_client(self, current_client):
+        """Handle communication with a single client."""
+        while True and self.is_server:
+            try:
+                # --- receive data from the client ---
+                message = self.recv(client=current_client, encrypted=True)
+                if not message:
+                    continue
+                print(f"Received from {current_client.ip}:{current_client.port}: {message}")
+                self.send(b"Message received!", encrypted=True, client=current_client)
+            except socket.timeout:
+                continue
+            except Exception as e:
+                print(f"Error handling client: {e}")
+                current_client.socket.close()
+                self.clients.remove(current_client)
+                print("Client disconnected.")
+                break
+        print("Client handler stopped.")
+                
+    def key_derivation(self, main_key:bytes) -> tuple[bytes, bytes]:
         salt = self.server_salt + self.client_salt  # Ensure fixed lengths for salts
         main_key: bytes = scrypt(main_key, salt, 64, N=2**14, r=8, p=1)  # derive a key from the AES key and server's salt
         self.aes_key = main_key[:32]  # AES-256 key (32 bytes)
@@ -167,6 +222,9 @@ class SecureConnection:
         
     def stop_server(self) -> None:
         """Stop the server."""
+        for client in self.clients:
+            client.socket.close()
+        self.clients.clear()
         if self.socket:
             self.socket.close()
             print("Server stopped.")
@@ -209,7 +267,9 @@ class SecureConnection:
                 if encrypted:
                     data = self.decrypt_aes_and_hmac(data, aes_key, hmac_key)
                 return data
-            except (ConnectionError, ValueError) as e:
+            except(ConnectionError) as e:
+                raise ConnectionError("Client disconnected")
+            except (ValueError) as e:
                 print(f"Error receiving data: {e}")
                 return None
         return None
