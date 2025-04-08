@@ -23,7 +23,22 @@ A simple HMAC mecanism is used to ensure the integrity and autentication of the 
 """
 
 class Client: # Client class to handle client management in the server
-    def __init__(self, socket):
+    """
+    A class representing a client connected to the server.
+    This class stores the client's IP address, port, socket, and keys.
+    Attributes:
+        ip (str): The IP address of the client.
+        port (int): The port number of the client.
+        socket (socket.socket): The socket associated with the client connection.
+        aes_key (bytes): The AES key used for encryption/decryption.
+        hmac_key (bytes): The HMAC key used for message integrity.
+    """
+    def __init__(self, socket: socket.socket):
+        """ Initialize the Client object with the socket
+
+        Args:
+            socket (socket.socket): The socket associated with the client connection.
+        """
         self.ip = socket.getpeername()[0]
         self.port = socket.getpeername()[1]
         self.socket = socket
@@ -49,7 +64,7 @@ class SecureConnection:
         self.aes_key = None
         self.hmac_key = None
         
-    def generate_rsa_key(self, size=2048, save=False):
+    def generate_rsa_key(self, size: int = 2048, save: bool = False) -> None:
         """Generate an RSA key pair."""
         self.private_key = RSA.generate(size)
         self.public_key = self.private_key.public_key()
@@ -61,20 +76,20 @@ class SecureConnection:
                 f.write(self.private_key.export_key(passphrase=password, pkcs=8, protection="scryptAndAES128-CBC")) # change passphrase
                 print("Private key saved as 'private.pem'.")
             with open("public.pem", "wb") as f:
-                f.write(self.public_key.export_key(format="PEM")) # change passphrase
+                f.write(self.public_key.export_key(format="PEM"))
                 print("Public key saved as 'public.pem'.")
 
-    def load_rsa_key(self, private_key_path=None, public_key_path=None):
+    def load_rsa_key(self, private_key_path: str = None, public_key_path: str = None, password: str = None) -> None:
         """Load RSA keys from files."""
         if private_key_path:
             with open(private_key_path, "rb") as f:
-                self.private_key = RSA.import_key(f.read())
+                self.private_key = RSA.import_key(f.read(), passphrase=password)  # change passphrase
         if public_key_path:
             with open(public_key_path, "rb") as f:
                 self.public_key = RSA.import_key(f.read())
         print("RSA keys loaded.")
 
-    def connect(self):
+    def connect(self) -> None:
         """Establish a connection to the server."""
         if self.is_client:
             print("Already connected to server.")
@@ -108,17 +123,21 @@ class SecureConnection:
         # ---- key derivation ----
         self.key_derivation(main_key)  # derive a key from the AES key and server's saltr
     
-    def disconnect(self) -> None:
+    def disconnect(self, Client: Client = None) -> None:
         """Disconnect the client."""
-        if self.socket:
-            try:
-                self.socket.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass  # Socket already closed
+        if self.is_client:
             self.socket.close()
-        self.socket = None
-
-    def start_server(self, thread=False) -> None:
+            self.socket = None
+            print("Client disconnected.")
+        elif self.is_server:
+            if Client is None:
+                self.clients[-1].socket.close()  # close the last client socket
+                self.clients.pop()  # remove the last client from the list
+            else:
+                Client.socket.close()  # close the specified client socket
+                self.clients.remove(Client)  # remove the specified client from the list
+                
+    def start_server(self, thread: bool = False) -> None:
         """Start the server."""
         socket.setdefaulttimeout(1)  # set a timeout for the socket to avoid blocking
         self.socket = socket.create_server((self.host, self.port))
@@ -150,7 +169,7 @@ class SecureConnection:
                 break
         print("Client manager stopped.")
      
-    def accept_client(self, thread=False) -> None:
+    def accept_client(self, thread: bool = False) -> None:
         """Accept a client connection."""
         if not self.is_server:
             print("Server is not running.")
@@ -161,7 +180,7 @@ class SecureConnection:
             client_socket, addr = self.socket.accept() # accept the client connection
         except socket.timeout:
             return
-        except:
+        except Exception:
             print("Error accepting client connection.")
             return
         
@@ -191,7 +210,7 @@ class SecureConnection:
             client_thread.start()
         return
 
-    def handle_client(self, current_client):
+    def handle_client(self, current_client: Client):
         """Handle communication with a single client."""
         while True and self.is_server:
             try:
@@ -210,7 +229,7 @@ class SecureConnection:
                 break
         print(f"Client {current_client.ip}:{current_client.port} handler stopped.")
                 
-    def key_derivation(self, main_key:bytes) -> tuple[bytes, bytes]:
+    def key_derivation(self, main_key: bytes) -> tuple[bytes, bytes]:
         salt = self.server_salt + self.client_salt  # Ensure fixed lengths for salts
         main_key: bytes = scrypt(main_key, salt, 64, N=2**14, r=8, p=1)  # derive a key from the AES key and server's salt
         self.aes_key = main_key[:32]  # AES-256 key (32 bytes)
@@ -230,7 +249,7 @@ class SecureConnection:
         self.socket = None
         self.is_server = False
         
-    def recv(self, encrypted=True, client: Client=None) -> bytes:
+    def recv(self, encrypted=True, client: Client = None) -> bytes:
         """Receive a message from the client."""
         if not self.is_server and not self.is_client: # if not connected at all
             return None
@@ -273,7 +292,7 @@ class SecureConnection:
                 return None
         return None
     
-    def send(self, message:bytes, encrypted=True, client:Client=None) -> None:
+    def send(self, message: bytes, encrypted: bool = True, client: Client = None) -> None:
         """Send a message to the client."""
         if not self.is_server and not self.is_client: # if not connected at all
             return
@@ -306,7 +325,7 @@ class SecureConnection:
         else:
             print("No connected.")
 
-    def encrypt_rsa(self, message:bytes) -> bytes:
+    def encrypt_rsa(self, message: bytes) -> bytes:
         """Encrypt a message using RSA public key."""
         if not self.public_key:
             raise ValueError("Public key is not available.")
@@ -314,7 +333,7 @@ class SecureConnection:
         encrypted_message = cipher.encrypt(message)
         return encrypted_message
     
-    def decrypt_rsa(self, message:bytes) -> bytes:
+    def decrypt_rsa(self, message: bytes) -> bytes:
         """Decrypt a message using RSA private key."""
         if not self.private_key:
             raise ValueError("Private key is not available.")
@@ -322,7 +341,7 @@ class SecureConnection:
         decrypted_message = cipher.decrypt(message)
         return decrypted_message
 
-    def encrypt_aes_and_hmac(self, message:bytes, aes_key:bytes, hmac_key:bytes) -> bytes:
+    def encrypt_aes_and_hmac(self, message: bytes, aes_key: bytes, hmac_key: bytes) -> bytes:
         """Encrypt a message using AES and HMAC."""
         if not aes_key or not hmac_key: 
             raise ValueError("AES key or HMAC key is not available.")
@@ -335,7 +354,7 @@ class SecureConnection:
         #print(iv.hex(), ciphertext.hex(), hmac.hex())
         return iv + ciphertext + hmac
 
-    def decrypt_aes_and_hmac(self, message:bytes, aes_key:bytes, hmac_key:bytes) -> bytes:
+    def decrypt_aes_and_hmac(self, message: bytes, aes_key: bytes, hmac_key: bytes) -> bytes:
         """Decrypt a message using AES and HMAC.
         This function will also verify the HMAC to ensure the integrity of the message.
         
@@ -404,6 +423,3 @@ class SecureConnection:
             print(self.socket.getsockname())  # local address
             print(self.socket.getsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF))  # in bytes
             print(self.socket.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF))
-
-
-
