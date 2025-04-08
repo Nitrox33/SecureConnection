@@ -39,6 +39,7 @@ class Client: # Client class to handle client management in the server
         Args:
             socket (socket.socket): The socket associated with the client connection.
         """
+        self.name = None
         self.ip = socket.getpeername()[0]
         self.port = socket.getpeername()[1]
         self.socket = socket

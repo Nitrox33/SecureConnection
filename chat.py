@@ -1,4 +1,4 @@
-from connection import SecureConnection
+from connection import SecureConnection, Client
 import time
 import threading
 from prompt_toolkit import PromptSession
@@ -25,7 +25,7 @@ def print_server_status(SERVER, last_number_client=0, last_thread_number=0) -> N
         for client in SERVER.clients:
             print(f'Client IP: {client.ip}')
 
-def handle_client_message(server, message, client):
+def handle_client_message(server: SecureConnection, message: bytes, client: Client) -> None:
     """Handles incoming messages from clients.
     This function is called when a message is received from a client.
     It prints the message to the console. and sends it to all other connected clients.
@@ -34,12 +34,14 @@ def handle_client_message(server, message, client):
         message (bytes): The message received from the client.
         client (Client): The client that sent the message.
     """
+    name = client.name if client.name else f"Client {client.ip}:{client.port}"
+    message = name.encode() + b": " + message
     print(f"{message.decode()}")
     for c in server.clients:
         if c != client:
             server.send(message, client=c)
 
-def server_mode(ip, port):
+def server_mode(ip: str, port: int) -> None:
     """Handles the server mode of the application.
     This function initializes the server, starts it, and handles incoming messages from clients.
     It also allows the user to send messages to all connected clients.
@@ -58,18 +60,18 @@ def server_mode(ip, port):
     try:
         with patch_stdout():
             while True:
-                user_input = session.prompt("> ")
+                user_input: str = session.prompt("> ")
                 if user_input.lower() == 'exit':
                     break
                 for client in SERVER.clients:
-                    SERVER.send(user_input.encode(), client=client)
+                    SERVER.send("server: ".encode() + user_input.encode(), client=client)
                 
     except KeyboardInterrupt:
         print("keyboard interrupt received")
     finally:
         SERVER.stop_server()
 
-def client_mode(ip, port):
+def client_mode(ip: str, port: int) -> None:
     com = SecureConnection(host=ip, port=port, verbose=False)
     com.connect()
     com.start_listener(lambda x: print(f"{x.decode()}"))
