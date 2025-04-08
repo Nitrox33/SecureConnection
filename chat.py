@@ -14,7 +14,8 @@ def ask_while_valid(prompt, valid_responses=None):
                 return response
             print(f"Please enter one of the following: {', '.join(valid_responses)}")
 
-def print_server_status(SERVER, last_number_client=0, last_thread_number=0):
+def print_server_status(SERVER, last_number_client=0, last_thread_number=0) -> None:
+    """Prints the status of the server, including the number of connected clients and active threads."""
     if threading.active_count() != last_thread_number:
         print(f'New thread started ({threading.active_count()})')
         last_thread_number = threading.active_count()
@@ -24,12 +25,35 @@ def print_server_status(SERVER, last_number_client=0, last_thread_number=0):
         for client in SERVER.clients:
             print(f'Client IP: {client.ip}')
 
+def handle_client_message(server, message, client):
+    """Handles incoming messages from clients.
+    This function is called when a message is received from a client.
+    It prints the message to the console. and sends it to all other connected clients.
+
+    Args:
+        message (bytes): The message received from the client.
+        client (Client): The client that sent the message.
+    """
+    print(f"{message.decode()}")
+    for c in server.clients:
+        if c != client:
+            server.send(message, client=c)
+
 def server_mode(ip, port):
+    """Handles the server mode of the application.
+    This function initializes the server, starts it, and handles incoming messages from clients.
+    It also allows the user to send messages to all connected clients.
+    It uses the SecureConnection class to manage the server connection and threading.
+
+    Args:
+        ip (str): The IP address for the server.
+        port (int): The port number for the server.
+    """
     SERVER = SecureConnection(host=ip, port=port, verbose=False)
     SERVER.start_server(thread=True)
     last_number_client = 0
     last_thread_number = threading.active_count()
-    SERVER.handle_client_function = lambda message,client: print(f"{message.decode()}")
+    SERVER.handle_client_function = handle_client_message
     session = PromptSession()
     try:
         with patch_stdout():
@@ -37,7 +61,8 @@ def server_mode(ip, port):
                 user_input = session.prompt("> ")
                 if user_input.lower() == 'exit':
                     break
-                SERVER.send(user_input.encode())
+                for client in SERVER.clients:
+                    SERVER.send(user_input.encode(), client=client)
                 
     except KeyboardInterrupt:
         print("keyboard interrupt received")
@@ -48,7 +73,6 @@ def client_mode(ip, port):
     com = SecureConnection(host=ip, port=port, verbose=False)
     com.connect()
     com.start_listener(lambda x: print(f"{x.decode()}"))
-    com.send(b"Hello World")
     session = PromptSession()
     try:
         with patch_stdout():

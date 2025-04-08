@@ -243,7 +243,7 @@ class SecureConnection:
                     continue
                 if self.handle_client_function:
                     # the user can handle the client function as a callback function
-                    self.handle_client_function(message, current_client) # the callback function should handle the message and the client object
+                    self.handle_client_function(self, message, current_client) # the callback function should handle the message and the client object
                 else:
                     print(f"Received from {current_client.ip}:{current_client.port}: {message}")
                     self.send(b"Message received!", encrypted=True, client=current_client)
