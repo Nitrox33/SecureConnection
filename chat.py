@@ -34,6 +34,11 @@ def handle_client_message(server: SecureConnection, message: bytes, client: Clie
         message (bytes): The message received from the client.
         client (Client): The client that sent the message.
     """
+    if "/name" in message.decode():
+        name = message.decode().split(" ")[1]
+        client.name = name
+        server.send(f"Your name is now {name}".encode(), client=client)
+        return
     name = client.name if client.name else f"Client {client.ip}:{client.port}"
     message = name.encode() + b": " + message
     print(f"{message.decode()}")
