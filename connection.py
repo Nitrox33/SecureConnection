@@ -40,9 +40,12 @@ class Client: # Client class to handle client management in the server
             socket (socket.socket): The socket associated with the client connection.
         """
         self.name = None
+        self.name_color: str = None
+        
         self.ip = socket.getpeername()[0]
         self.port = socket.getpeername()[1]
         self.socket = socket
+        
         self.aes_key = None
         self.hmac_key = None
         

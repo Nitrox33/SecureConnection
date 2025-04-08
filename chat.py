@@ -3,16 +3,28 @@ import time
 import threading
 from prompt_toolkit import PromptSession
 from prompt_toolkit.patch_stdout import patch_stdout
+import colorama
+
+colorama.init(autoreset=True)
+
+color_table = {
+    "red": colorama.Fore.RED,
+    "green": colorama.Fore.GREEN,
+    "blue": colorama.Fore.BLUE,
+    "yellow": colorama.Fore.YELLOW,
+    "cyan": colorama.Fore.CYAN,
+    "magenta": colorama.Fore.MAGENTA,
+}
 
 
-def ask_while_valid(prompt, valid_responses=None):
+def ask_while_valid(prompt: str, valid_responses: list[str] = None) -> str:
     session = PromptSession()
     with patch_stdout():
         while True:
             response = session.prompt(prompt).lower()
             if valid_responses is None or response in valid_responses:
                 return response
-            print(f"Please enter one of the following: {', '.join(valid_responses)}")
+            print(f"{colorama.Fore.RED}Please enter one of the following: {', '.join(valid_responses)}{colorama.Style.RESET_ALL}")
 
 def print_server_status(SERVER, last_number_client=0, last_thread_number=0) -> None:
     """Prints the status of the server, including the number of connected clients and active threads."""
@@ -39,8 +51,37 @@ def handle_client_message(server: SecureConnection, message: bytes, client: Clie
         client.name = name
         server.send(f"Your name is now {name}".encode(), client=client)
         return
+    
+    if "/color" in message.decode():
+        color = message.decode().split(" ")[1]
+        if color in ["red", "green", "blue", "yellow", "cyan", "magenta"]:
+            client.color = color
+            server.send(f"Your color is now {color}".encode(), client=client)
+            client.name_color = color_table[color]
+            return
+        else:
+            server.send(f"Invalid color. Available colors: red, green, blue, yellow, cyan, magenta".encode(), client=client)
+            return
+        
+    if "/help" in message.decode():
+        help_message = (
+            "/name <name> - Set your name\n"
+            "/color <color> - Set your name color (red, green, blue, yellow, cyan, magenta)\n"
+            "/help - Show this help message\n"
+            "/exit - Disconnect from the server\n"
+        )
+        server.send(help_message.encode(), client=client)
+        return
+
+    if "/exit" in message.decode():
+        server.send("Goodbye!".encode(), client=client)
+        server.disconnect(client)
+        return
+        
     name = client.name if client.name else f"Client {client.ip}:{client.port}"
-    message = name.encode() + b": " + message
+    color = client.name_color if client.name_color else colorama.Style.RESET_ALL
+    
+    message = color.encode() + name.encode() + b": " + colorama.Style.RESET_ALL.encode() + message
     print(f"{message.decode()}")
     for c in server.clients:
         if c != client:
