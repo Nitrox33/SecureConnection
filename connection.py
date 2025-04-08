@@ -50,6 +50,8 @@ class Client: # Client class to handle client management in the server
 
 class SecureConnection:
     def __init__(self, host='localhost', port=12345, verbose=False):
+        socket.setdefaulttimeout(1)  # set a timeout for the socket to avoid blocking
+        
         self.host = host
         self.port = port
         self.socket = None
@@ -63,6 +65,9 @@ class SecureConnection:
         self.public_key = None
         self.aes_key = None
         self.hmac_key = None
+        
+        self.threads: list[threading.Thread] = []
+        self.handle_client_function: callable = None # callback function to handle the client messages, must take 2 arguments: the message and the client object
         
     def generate_rsa_key(self, size: int = 2048, save: bool = False) -> None:
         """Generate an RSA key pair."""
@@ -90,7 +95,10 @@ class SecureConnection:
         print("RSA keys loaded.")
 
     def connect(self) -> None:
-        """Establish a connection to the server."""
+        """
+        Connect to the server as a client.
+        This function will perform the key exchange and establish a secure connection.
+        """
         if self.is_client:
             print("Already connected to server.")
             return
@@ -126,10 +134,15 @@ class SecureConnection:
     def disconnect(self, Client: Client = None) -> None:
         """Disconnect the client."""
         if self.is_client:
+            self.is_client = False
+            if self.threads:
+                print(self.threads)
+                for thread in self.threads:
+                    thread.join() # wait for all threads to finish
             self.socket.close()
             self.socket = None
             print("Client disconnected.")
-        elif self.is_server:
+        elif self.is_server: # we should finfd the thread that is managing the client
             if Client is None:
                 self.clients[-1].socket.close()  # close the last client socket
                 self.clients.pop()  # remove the last client from the list
@@ -147,12 +160,14 @@ class SecureConnection:
         self.socket.listen(5)
         self.is_server = True
         if thread:
-            server_thread = threading.Thread(target=self.client_manager)
-            server_thread.start()
-        self.accept_client()  # accept the first client connection immediately after starting the server
+            self.threads.append(threading.Thread(target=self.client_manager))
+            self.threads[-1].start()
                     
     def client_manager(self) -> None:
-        """Manage client connections."""
+        """
+        This function will run in a separate thread to manage client connections.
+        It will accept client connections and start a new thread for each client.
+        """
         if not self.is_server:
             print("Server is not running.")
             return
@@ -169,15 +184,20 @@ class SecureConnection:
                 break
         print("Client manager stopped.")
      
-    def accept_client(self, thread: bool = False) -> None:
-        """Accept a client connection."""
+    def accept_client(self, thread: bool = False, timeout: float = 1.0) -> None:
+        """Accept a client connection and perform key exchange.
+
+        Args:
+            thread (bool, optional): Whether to run the client handling in a separate thread. Defaults to False.
+            timeout (float, optional): Timeout for the socket operation. Defaults to 1.0.
+        """
         if not self.is_server:
             print("Server is not running.")
             return
         
         #---- accept a client connection ----
         try:
-            client_socket, addr = self.socket.accept() # accept the client connection
+            client_socket, addr = self.socket.accept()  # accept the client connection
         except socket.timeout:
             return
         except Exception:
@@ -206,20 +226,27 @@ class SecureConnection:
         current_client.aes_key, current_client.hmac_key = self.key_derivation(main_key)  # derive a key from the AES key and server's salt
         # Start a new thread to handle the client
         if thread:
-            client_thread = threading.Thread(target=self.handle_client, args=(current_client,))
-            client_thread.start()
+            self.threads.append(threading.Thread(target=self.handle_client, args=(current_client,)))
+            self.threads[-1].start()
         return
 
-    def handle_client(self, current_client: Client):
-        """Handle communication with a single client."""
+    def handle_client(self, current_client: Client) -> None:
+        """
+        Handle communication with a single client. (created by accept_client)
+        This function will run in a separate thread for each client.
+        """
         while True and self.is_server:
             try:
                 # --- receive data from the client ---
                 message = self.recv(client=current_client, encrypted=True)
                 if not message:
                     continue
-                print(f"Received from {current_client.ip}:{current_client.port}: {message}")
-                self.send(b"Message received!", encrypted=True, client=current_client)
+                if self.handle_client_function:
+                    # the user can handle the client function as a callback function
+                    self.handle_client_function(message, current_client) # the callback function should handle the message and the client object
+                else:
+                    print(f"Received from {current_client.ip}:{current_client.port}: {message}")
+                    self.send(b"Message received!", encrypted=True, client=current_client)
             except socket.timeout:
                 continue
             except Exception as e:
@@ -240,6 +267,18 @@ class SecureConnection:
         
     def stop_server(self) -> None:
         """Stop the server."""
+        if not self.is_server:
+            print("Server is not running.")
+            return
+        else:
+            print("Stopping server...")
+            self.is_server = False
+            
+        if self.threads:
+            for thread in self.threads:
+                thread.join()
+        self.threads.clear()
+            
         for client in self.clients:
             client.socket.close()
         self.clients.clear()
@@ -247,8 +286,40 @@ class SecureConnection:
             self.socket.close()
             print("Server stopped.")
         self.socket = None
-        self.is_server = False
-        
+    
+    def start_listener(self, function: callable=None) -> None:
+        """Start a listener thread to receive data from the client."""
+        if not self.is_client:
+            print("Client is not connected.")
+            return
+        self.threads.append(threading.Thread(target=self.listener, args=(function,)))
+        self.threads[-1].start()
+        print("Listener started.")
+    
+    def listener(self, function: callable) -> None:
+        """Listen for incoming data in the client side"""
+        if not self.is_client:
+            print("Client is not connected.")
+            return
+        if not self.socket:
+            print("Socket is not available.")
+            return
+        while True and self.is_client:
+            try:
+                # ---- receive data from the server ----
+                message = self.recv(encrypted=True)  # receive data from the server
+                if not function:
+                    print(f"Received: {message}")
+                else:
+                    function(message)
+            except socket.timeout:
+                if self.is_client:
+                    continue
+            except Exception as e:
+                print(f"Error receiving data: {e}")
+                break
+        print("Listener stopped.")
+    
     def recv(self, encrypted=True, client: Client = None) -> bytes:
         """Receive a message from the client."""
         if not self.is_server and not self.is_client: # if not connected at all
