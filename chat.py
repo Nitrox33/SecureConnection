@@ -1,0 +1,79 @@
+from connection import SecureConnection
+import time
+import threading
+from prompt_toolkit import PromptSession
+from prompt_toolkit.patch_stdout import patch_stdout
+
+
+def ask_while_valid(prompt, valid_responses=None):
+    session = PromptSession()
+    with patch_stdout():
+        while True:
+            response = session.prompt(prompt).lower()
+            if valid_responses is None or response in valid_responses:
+                return response
+            print(f"Please enter one of the following: {', '.join(valid_responses)}")
+
+def print_server_status(SERVER, last_number_client=0, last_thread_number=0):
+    if threading.active_count() != last_thread_number:
+        print(f'New thread started ({threading.active_count()})')
+        last_thread_number = threading.active_count()
+    if len(SERVER.clients) != last_number_client:
+        print("Connected clients:")
+        last_number_client = len(SERVER.clients)
+        for client in SERVER.clients:
+            print(f'Client IP: {client.ip}')
+
+def server_mode(ip, port):
+    SERVER = SecureConnection(host=ip, port=port, verbose=False)
+    SERVER.start_server(thread=True)
+    last_number_client = 0
+    last_thread_number = threading.active_count()
+    SERVER.handle_client_function = lambda message,client: print(f"{message.decode()}")
+    session = PromptSession()
+    try:
+        with patch_stdout():
+            while True:
+                user_input = session.prompt("> ")
+                if user_input.lower() == 'exit':
+                    break
+                SERVER.send(user_input.encode())
+                
+    except KeyboardInterrupt:
+        print("keyboard interrupt received")
+    finally:
+        SERVER.stop_server()
+
+def client_mode(ip, port):
+    com = SecureConnection(host=ip, port=port, verbose=False)
+    com.connect()
+    com.start_listener(lambda x: print(f"{x.decode()}"))
+    com.send(b"Hello World")
+    session = PromptSession()
+    try:
+        with patch_stdout():
+            while True:
+                input_message = session.prompt("> ")
+                if input_message.lower() == 'exit':
+                    break
+                com.send(input_message.encode())
+    except KeyboardInterrupt:
+        print("\nExiting...")
+    finally:
+        print("\nDisconnecting...")
+        com.disconnect()
+        print("Disconnected.")
+
+def main():
+    mode = ask_while_valid("Enter 's' for server or 'c' for client: ", ['s', 'c'])
+    ip = input("Enter the IP address (leave empty for localhost): ") or "localhost"
+    port = int(input("Enter the port (leave empty for 43221): ") or 43221)
+    
+    if mode == 's':
+        server_mode(ip, port)
+            
+    elif mode == 'c':
+        client_mode(ip, port)
+        
+if __name__ == "__main__":
+    main()
