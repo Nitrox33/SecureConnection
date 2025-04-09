@@ -71,7 +71,8 @@ class SecureConnection:
         
         self.is_server = False
         self.is_client = False
-        self.clients: list = []  # list of client sockets for the server
+        self.is_connected = lambda: self.is_server or self.is_client
+        self.clients: list[Client] = []  # list of client sockets for the server
         
         self.private_key = None
         self.public_key = None
@@ -305,7 +306,7 @@ class SecureConnection:
             print("Server stopped.")
         self.socket = None
     
-    def start_listener(self, function: callable=None) -> None:
+    def start_listener(self, function: callable = None) -> None:
         """Start a listener thread to receive data from the client."""
         if not self.is_client:
             print("Client is not connected.")

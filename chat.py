@@ -29,18 +29,6 @@ def ask_while_valid(prompt: str, valid_responses: list[str] = None) -> str:
                 return response
             print(f"{colorama.Fore.RED}Please enter one of the following: {', '.join(valid_responses)}{colorama.Style.RESET_ALL}")
 
-def print_server_status(SERVER, last_number_client=0, last_thread_number=0) -> None:
-    """Prints the status of the server, including the number of connected clients and active threads."""
-    if threading.active_count() != last_thread_number:
-        print(f'New thread started ({threading.active_count()})')
-        last_thread_number = threading.active_count()
-    if len(SERVER.clients) != last_number_client:
-        print("Connected clients:")
-        last_number_client = len(SERVER.clients)
-        for client in SERVER.clients:
-            logging.info(f"Client {client.ip}:{client.port} connected")
-            print(f'Client IP: {client.ip}')
-
 def handle_client_message(server: SecureConnection, message: bytes, client: Client) -> None:
     """Handles incoming messages from clients.
     This function is called when a message is received from a client.
@@ -125,8 +113,6 @@ def server_mode(ip: str, port: int) -> None:
     logging.info(f"Starting server on {ip}:{port}")
     SERVER = SecureConnection(host=ip, port=port, verbose=False)
     SERVER.start_server(thread=True)
-    last_number_client = 0
-    last_thread_number = threading.active_count()
     SERVER.handle_client_function = handle_client_message
     session = PromptSession()
     logging.info("Server started. Waiting for clients...")
