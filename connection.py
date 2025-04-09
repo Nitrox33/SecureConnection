@@ -9,6 +9,7 @@ from Crypto.Hash import HMAC
 from Crypto.Hash import SHA256
 from Crypto.Protocol.KDF import scrypt
 from sys import getsizeof
+import logging 
 
 """
 This script will implement a secure connection between a client and a server 
@@ -20,7 +21,14 @@ The client will respond with a random AES key encrypted with the server's public
 The client and server will then derive a key from the AES key and the salt value using scrypt.
 A simple HMAC mecanism is used to ensure the integrity and autentication of the messages.
 
+todo: certificate?
+todo: add a send_file function to send files
+todo: add a receive_file function to receive files
+todo logging
+todo create better protocol for messages, like a header with the message type, length, name, etc.
 """
+
+MAX_MESSAGE_SIZE: int = 1024**2 * 50 # 10 MB limit for the message size
 
 class Client: # Client class to handle client management in the server
     """
@@ -53,7 +61,7 @@ class Client: # Client class to handle client management in the server
         return f"client {self.ip}:{self.port} --- aes_key: {self.aes_key.hex() if self.aes_key else 'None'} --- hmac_key: {self.hmac_key.hex() if self.hmac_key else 'None'}"
 
 class SecureConnection:
-    def __init__(self, host='localhost', port=12345, verbose=False):
+    def __init__(self, host='localhost', port=12345, verbose=False, logging_path=None):
         socket.setdefaulttimeout(1)  # set a timeout for the socket to avoid blocking
         
         self.host = host
@@ -71,7 +79,13 @@ class SecureConnection:
         self.hmac_key = None
         
         self.threads: list[threading.Thread] = []
-        self.handle_client_function: callable = None # callback function to handle the client messages, must take 2 arguments: the message and the client object
+        self.handle_client_function: callable = None # callback function to handle the client messages, must take 3 arguments: the SecureConnexion self, the message and the client object
+        
+        if logging_path:
+            logging.basicConfig(filename=logging_path, level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+        else:
+            logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+        logging.info("SecureConnection initialized.")
         
     def generate_rsa_key(self, size: int = 2048, save: bool = False) -> None:
         """Generate an RSA key pair."""
@@ -324,7 +338,7 @@ class SecureConnection:
                 break
         print("Listener stopped.")
     
-    def recv(self, encrypted=True, client: Client = None) -> bytes:
+    def recv(self, encrypted=True, client: Client = None, file: bool = False) -> bytes:
         """Receive a message from the client."""
         if not self.is_server and not self.is_client: # if not connected at all
             return None
@@ -348,26 +362,27 @@ class SecureConnection:
                 message_length = int.from_bytes(header, 'big')
                 data = b""
                 while len(data) < message_length:
-                    size = min(2048, message_length - len(data))
+                    size =  message_length - len(data) # remaining size to receive - not needed if we use a fixed size
                     chunk = client_socket.recv(size)
                     if not chunk:
                         raise ConnectionError("Socket closed during message reception.")
                     data += chunk
 
                 if len(data) != message_length:
+                    print("Incomplete message received.")
                     raise ValueError("Incomplete message received.")
 
                 if encrypted:
                     data = self.decrypt_aes_and_hmac(data, aes_key, hmac_key)
                 return data
-            except(ConnectionError) as e:
-                raise ConnectionError("Client disconnected")
+            except (ConnectionError) as e:
+                raise ConnectionError("Client disconnected" + str(e))
             except (ValueError) as e:
                 print(f"Error receiving data: {e}")
                 return None
         return None
     
-    def send(self, message: bytes, encrypted: bool = True, client: Client = None) -> None:
+    def send(self, message: bytes, encrypted: bool = True, client: Client = None, file_path: str = "") -> None:
         """Send a message to the client."""
         if not self.is_server and not self.is_client: # if not connected at all
             return
@@ -388,6 +403,14 @@ class SecureConnection:
             aes_key, hmac_key = client.aes_key, client.hmac_key
         
         if client_socket:
+            if file_path != "": # if file path is specified, we need to send the file
+                # if file, we need to send the file size first
+                with open(file_path, "rb") as file:
+                    file_data = file.read()
+                    file_data_encrypted = self.encrypt_aes_and_hmac(file_data, aes_key, hmac_key)
+                    header = len(file_data_encrypted).to_bytes(4, 'big')
+                    client_socket.sendall(header + b'/upload' + file_data_encrypted)
+                return
             if encrypted:
                 # Encrypt the message using AES and HMAC
                 message = self.encrypt_aes_and_hmac(message, aes_key, hmac_key)
@@ -427,6 +450,7 @@ class SecureConnection:
         ciphertext = cipher.encrypt(pad(message, AES.block_size)) # AES encryption
         hmac = HMAC.new(hmac_key, ciphertext, SHA256).digest()
         #print(iv.hex(), ciphertext.hex(), hmac.hex())
+        
         return iv + ciphertext + hmac
 
     def decrypt_aes_and_hmac(self, message: bytes, aes_key: bytes, hmac_key: bytes) -> bytes:
