@@ -10,6 +10,8 @@ from Crypto.Hash import SHA256
 from Crypto.Protocol.KDF import scrypt
 from sys import getsizeof
 import logging 
+from concurrent.futures import ProcessPoolExecutor
+
 
 """
 This script will implement a secure connection between a client and a server 
@@ -29,6 +31,13 @@ todo create better protocol for messages, like a header with the message type, l
 """
 
 MAX_MESSAGE_SIZE: int = 1024**2 * 50 # 10 MB limit for the message size
+
+def key_derivation(main_key: bytes, server_salt: bytes, client_salt: bytes) -> tuple[bytes, bytes]:
+        salt = server_salt + client_salt  # concatenate the server and client salts
+        main_key: bytes = scrypt(main_key, salt, 64, N=2**14, r=8, p=1)  # derive a key from the AES key and server's salt
+        aes_key = main_key[:32]  # AES key (256 bits)
+        hmac_key = main_key[32:]  # HMAC key (256 bits)
+        return aes_key, hmac_key
 
 class Client: # Client class to handle client management in the server
     """
@@ -56,6 +65,9 @@ class Client: # Client class to handle client management in the server
         
         self.aes_key = None
         self.hmac_key = None
+
+        self.id: int | None = None # id of the client, used to identify the client in the server
+        self.input_buffer: list[bytes] = []
         
     def __repr__(self):
         return f"client {self.ip}:{self.port} --- aes_key: {self.aes_key.hex() if self.aes_key else 'None'} --- hmac_key: {self.hmac_key.hex() if self.hmac_key else 'None'}"
@@ -85,7 +97,7 @@ class SecureConnection:
         if logging_path:
             logging.basicConfig(filename=logging_path, level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
         else:
-            logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+            logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
         logging.info("SecureConnection initialized.")
         
     def generate_rsa_key(self, size: int = 2048, save: bool = False) -> None:
@@ -96,12 +108,12 @@ class SecureConnection:
             with open("private.pem", "wb") as f:
                 print("Choose a secure passphrase to protect your private key: ")
                 password = input()
-                print(f"saving private key... with passphrase '{password}'")
+                logging.info(f"Saving private key with passphrase: {password}")
                 f.write(self.private_key.export_key(passphrase=password, pkcs=8, protection="scryptAndAES128-CBC")) # change passphrase
-                print("Private key saved as 'private.pem'.")
+                logging.info("Private key saved as 'private.pem'.")
             with open("public.pem", "wb") as f:
                 f.write(self.public_key.export_key(format="PEM"))
-                print("Public key saved as 'public.pem'.")
+                logging.info("Public key saved as 'public.pem'.")
 
     def load_rsa_key(self, private_key_path: str = None, public_key_path: str = None, password: str = None) -> None:
         """Load RSA keys from files."""
@@ -111,7 +123,7 @@ class SecureConnection:
         if public_key_path:
             with open(public_key_path, "rb") as f:
                 self.public_key = RSA.import_key(f.read())
-        print("RSA keys loaded.")
+        logging.info("RSA keys loaded.")
 
     def connect(self) -> None:
         """
@@ -119,48 +131,52 @@ class SecureConnection:
         This function will perform the key exchange and establish a secure connection.
         """
         if self.is_client:
-            print("Already connected to server.")
+            logging.error("Already connected as a client.")
             return
         if self.is_server:
-            print("Cannot connect as a client while the server is running.")
+            logging.error("Already connected as a server.")
             return
         
         # ----- create a socket and connect to the server ----
-        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM) # create a TCP socket
         self.socket.connect((self.host, self.port))
-        print(f"Connected to server at {self.host}:{self.port}")
+        logging.info(f"Connected to {self.host}:{self.port}, exchanging keys...")
+        
         self.is_client = True
         
         # ----- receiving data from the server ----
+        logging.debug("Receiving public key and salt from server...")
         pub_key = self.recv(encrypted=False)  # receive server's public key
         self.public_key = RSA.import_key(pub_key)
-        if self.verbose: print(f"Received server's public key")
         self.server_salt = self.recv(encrypted=False) # receive server's salt
-        if self.verbose: print(f"Received server's salt: {self.server_salt.hex()}")
+        logging.debug(f"Received public key and salt from server: {self.server_salt.hex()}")
         
         # ---- sending data to the server ----
+        logging.debug("Sending main key and salt to server...")
         main_key= get_random_bytes(16)  # generate a random main key
         main_key_encrypted = self.encrypt_rsa(main_key)  # encrypt the main key with server's public key
         self.send(main_key_encrypted, encrypted=False) 
-        if self.verbose: print(f"Sent main key to server: {main_key.hex()}")
         self.client_salt = get_random_bytes(8)  # generate a random salt for the client
         self.send(self.client_salt, encrypted=False)  # send client salt to server
-        if self.verbose: print(f"Sent client salt: {self.client_salt.hex()}") 
+        logging.debug(f"Sent main key and salt to server: {self.client_salt.hex()}")
 
         # ---- key derivation ----
-        self.key_derivation(main_key)  # derive a key from the AES key and server's saltr
+        logging.debug(f"Deriving keys from main key...")
+        self.aes_key, self.hmac_key = key_derivation(main_key, self.server_salt, self.client_salt)  # derive a key from the AES key and server's saltr
+        logging.debug(f"Derived keys: aes_key: {self.aes_key.hex()[:8]}... hmac_key: {self.hmac_key.hex()[:8]}...")
+        logging.info(f"Client connected to server at {self.host}:{self.port}")
     
     def disconnect(self, Client: Client = None) -> None:
         """Disconnect the client."""
         if self.is_client:
             self.is_client = False
             if self.threads:
-                print(self.threads)
+                logging.info("Stopping threads...")
                 for thread in self.threads:
                     thread.join() # wait for all threads to finish
             self.socket.close()
             self.socket = None
-            print("Client disconnected.")
+            logging.info("Client disconnected.")
         elif self.is_server: # we should finfd the thread that is managing the client
             if Client is None:
                 self.clients[-1].socket.close()  # close the last client socket
@@ -175,10 +191,11 @@ class SecureConnection:
         self.socket = socket.create_server((self.host, self.port))
         if not self.private_key:
             self.generate_rsa_key()   
-        print(f"Server started at {self.host}:{self.port}")
+        logging.info(f"Server started on {self.host}:{self.port}, waiting for clients...")
         self.socket.listen(5)
         self.is_server = True
         if thread:
+            logging.info("Starting client manager thread...")
             self.threads.append(threading.Thread(target=self.client_manager))
             self.threads[-1].start()
                     
@@ -188,20 +205,19 @@ class SecureConnection:
         It will accept client connections and start a new thread for each client.
         """
         if not self.is_server:
-            print("Server is not running.")
+            logging.error("Server is not running.")
             return
         while True and self.is_server:
             try:
                 self.accept_client(thread=True)  # accept a client connection
-                if self.verbose: print(f"Client connected: {self.clients[-1]}")
             except socket.timeout:
                 continue
             except KeyboardInterrupt:
                 break
             except Exception as e:
-                print(f"Error accepting client: {e}")
+                logging.error(f"Error in client manager: {e}")
                 break
-        print("Client manager stopped.")
+        logging.debug("Client manager stopped.")
      
     def accept_client(self, thread: bool = False, timeout: float = 1.0) -> None:
         """Accept a client connection and perform key exchange.
@@ -211,7 +227,7 @@ class SecureConnection:
             timeout (float, optional): Timeout for the socket operation. Defaults to 1.0.
         """
         if not self.is_server:
-            print("Server is not running.")
+            logging.error("Server is not running.")
             return
         
         #---- accept a client connection ----
@@ -220,33 +236,51 @@ class SecureConnection:
         except socket.timeout:
             return
         except Exception:
-            print("Error accepting client connection.")
+            logging.error("Error accepting client connection.")
             return
         
-        print(f"Connection accepted from {addr}")
+        # --- create a client object and add it to the list of clients ---
+        logging.info(f"Client accepted from {addr}")
         current_client = Client(client_socket)  # create a client object
         self.clients.append(current_client)  # add the client socket to the list of client sockets
-        # ---- sending salt and public key to the client ----
-        self.send(self.public_key.export_key(format="DER"), client=current_client, encrypted=False)  # send public key to client    
-        self.server_salt = get_random_bytes(8)  # generate a random salt for the server
-        self.send(self.server_salt, client=current_client, encrypted=False)  # send server's salt to client
-        if self.verbose: print(f"Sent server's salt: {self.server_salt.hex()}")
+        
+        # ---- if problem with the client, close the socket and remove it from the list ----
+        try:
+            # ---- sending salt and public key to the client ----
+            self.send(self.public_key.export_key(format="DER"), client=current_client, encrypted=False)  # send public key to client    
+            self.server_salt = get_random_bytes(8)  # generate a random salt for the server
+            self.send(self.server_salt, client=current_client, encrypted=False)  # send server's salt to client
 
-        # ---- receiving data from the client ----
-        r_key_encrypted = self.recv(encrypted=False, client=current_client)  # receive main_key from client
-        if self.verbose: print(r_key_encrypted.hex())
-        main_key = self.decrypt_rsa(r_key_encrypted)  # decrypt the main_key with private key
-        if self.verbose: print(f"main key: {main_key.hex()}")
-        self.client_salt = self.recv(encrypted=False, client=current_client)  # receive client salt
-        if self.verbose: print(f"Received client salt: {self.client_salt.hex()}")
-        
-        # ---- key derivation ----
-        
-        current_client.aes_key, current_client.hmac_key = self.key_derivation(main_key)  # derive a key from the AES key and server's salt
-        # Start a new thread to handle the client
-        if thread:
-            self.threads.append(threading.Thread(target=self.handle_client, args=(current_client,)))
-            self.threads[-1].start()
+            # ---- receiving data from the client ----
+            logging.debug(f"Waiting for client {current_client.ip}:{current_client.port} to send main key and salt...")
+            r_key_encrypted = self.recv(encrypted=False, client=current_client)  # receive main_key from client
+            self.client_salt = self.recv(encrypted=False, client=current_client)  # receive client salt
+            logging.debug(f"Received main key and client salt from client {current_client.ip}:{current_client.port}")
+
+            # ---- decrypting the main key ----
+            logging.debug(f"Decrypting main key with private key...")
+            main_key = self.decrypt_rsa(r_key_encrypted)  # decrypt the main_key with private key
+            logging.debug(f"Decrypted main key: {main_key.hex()[:8]}...")
+
+            # ---- key derivation ----
+            logging.debug(f"Deriving keys from main key...")
+            with ProcessPoolExecutor() as executor: # use a process pool to optimize the key derivation time
+                logging.debug(f"Main key: {main_key.hex()}")
+                logging.debug(f"Salts: {self.server_salt.hex(), self.client_salt.hex()}")
+                future = executor.submit(key_derivation, main_key, self.server_salt, self.client_salt)  # derive a key from the AES key and server's salt
+                aes_key, hmac_key = future.result()
+            logging.debug(f"Derived keys: aes_key: {aes_key.hex()[:8]}... hmac_key: {hmac_key.hex()[:8]}...")
+            current_client.aes_key, current_client.hmac_key = aes_key, hmac_key  # derive a key from the AES key and server's salt
+            
+            # --- Start a new thread to handle the client ---
+            if thread:
+                logging.debug(f"Starting thread for client {current_client.ip}:{current_client.port}")
+                self.threads.append(threading.Thread(target=self.handle_client, args=(current_client,)))
+                self.threads[-1].start()
+        except Exception as e:
+            logging.error(f"Error during key exchange with client {current_client.ip}:{current_client.port}: {e}")
+            current_client.socket.close()
+            self.clients.remove(current_client)
         return
 
     def handle_client(self, current_client: Client) -> None:
@@ -254,6 +288,7 @@ class SecureConnection:
         Handle communication with a single client. (created by accept_client)
         This function will run in a separate thread for each client.
         """
+        logging.debug(f"Thread for client {current_client.ip}:{current_client.port} Started.")
         while True and self.is_server:
             try:
                 # --- receive data from the client ---
@@ -264,33 +299,24 @@ class SecureConnection:
                     # the user can handle the client function as a callback function
                     self.handle_client_function(self, message, current_client) # the callback function should handle the message and the client object
                 else:
-                    print(f"Received from {current_client.ip}:{current_client.port}: {message}")
+                    logging.info(f"Received message from client {current_client.ip}:{current_client.port}: {message}")
                     self.send(b"Message received!", encrypted=True, client=current_client)
             except socket.timeout:
                 continue
             except Exception as e:
                 current_client.socket.close()
                 self.clients.remove(current_client)
-                print(f"Client {current_client.ip}:{current_client.port} disconnected.")
+                logging.info(f"Client {current_client.ip}:{current_client.port} disconnected.")
                 break
-        print(f"Client {current_client.ip}:{current_client.port} handler stopped.")
+        logging.debug(f"Thread [client handler] for client {current_client.ip}:{current_client.port} stopped.")
                 
-    def key_derivation(self, main_key: bytes) -> tuple[bytes, bytes]:
-        salt = self.server_salt + self.client_salt  # Ensure fixed lengths for salts
-        main_key: bytes = scrypt(main_key, salt, 64, N=2**14, r=8, p=1)  # derive a key from the AES key and server's salt
-        self.aes_key = main_key[:32]  # AES-256 key (32 bytes)
-        self.hmac_key = main_key[32:]  # use the last 32 bytes as the HMAC key
-        if self.verbose: print(f"AES key: {self.aes_key.hex()}")
-        if self.verbose: print(f"HMAC key: {self.hmac_key.hex()}")
-        return self.aes_key, self.hmac_key
-        
     def stop_server(self) -> None:
+        logging.info("Stopping server...")
         """Stop the server."""
         if not self.is_server:
-            print("Server is not running.")
+            logging.error("Server is not running.")
             return
         else:
-            print("Stopping server...")
             self.is_server = False
             
         if self.threads:
@@ -303,41 +329,42 @@ class SecureConnection:
         self.clients.clear()
         if self.socket:
             self.socket.close()
-            print("Server stopped.")
+            logging.info("Server closed.")
         self.socket = None
     
     def start_listener(self, function: callable = None) -> None:
+        logging.debug("Starting listener...")
         """Start a listener thread to receive data from the client."""
         if not self.is_client:
-            print("Client is not connected.")
+            logging.error("Client is not connected.")
             return
         self.threads.append(threading.Thread(target=self.listener, args=(function,)))
         self.threads[-1].start()
-        print("Listener started.")
+        logging.debug("Listener started.")
     
     def listener(self, function: callable) -> None:
         """Listen for incoming data in the client side"""
         if not self.is_client:
-            print("Client is not connected.")
+            logging.error("Client is not connected.")
             return
         if not self.socket:
-            print("Socket is not available.")
+            logging.error("Socket is not connected.")
             return
         while True and self.is_client:
             try:
                 # ---- receive data from the server ----
                 message = self.recv(encrypted=True)  # receive data from the server
                 if not function:
-                    print(f"Received: {message}")
+                    logging.info(f"Received message from server: {message}")
                 else:
                     function(message)
             except socket.timeout:
                 if self.is_client:
                     continue
             except Exception as e:
-                print(f"Error receiving data: {e}")
+                logging.error(f"Error receiving data from server: {e}")
                 break
-        print("Listener stopped.")
+        logging.debug("Listener stopped.")
     
     def recv(self, encrypted=True, client: Client = None, file: bool = False) -> bytes:
         """Receive a message from the client."""
@@ -370,7 +397,7 @@ class SecureConnection:
                     data += chunk
 
                 if len(data) != message_length:
-                    print("Incomplete message received.")
+                    logging.error(f"Received incomplete message: {len(data)} bytes instead of {message_length} bytes.")
                     raise ValueError("Incomplete message received.")
 
                 if encrypted:
@@ -379,7 +406,7 @@ class SecureConnection:
             except (ConnectionError) as e:
                 raise ConnectionError("Client disconnected" + str(e))
             except (ValueError) as e:
-                print(f"Error receiving data: {e}")
+                logging.error(f"Error receiving data: {e}")
                 return None
         return None
     
@@ -394,7 +421,7 @@ class SecureConnection:
                     client_socket = self.clients[-1].socket
                     aes_key, hmac_key = self.clients[-1].aes_key, self.clients[-1].hmac_key
                 else:
-                    print("No connected clients.")
+                    logging.error("No clients connected.")
                     return
             elif self.is_client: # if client, send to the server socket
                 client_socket = self.socket
@@ -404,7 +431,7 @@ class SecureConnection:
             aes_key, hmac_key = client.aes_key, client.hmac_key
         
         if client_socket:
-            if file_path != "": # if file path is specified, we need to send the file
+            if file_path != "": # if file path is specified, we need to send the file  #### to change
                 # if file, we need to send the file size first
                 with open(file_path, "rb") as file:
                     file_data = file.read()
@@ -422,7 +449,7 @@ class SecureConnection:
             client_socket.sendall(header + message)
 
         else:
-            print("No connected.")
+            logging.error("Client socket is not connected.")
 
     def encrypt_rsa(self, message: bytes) -> bytes:
         """Encrypt a message using RSA public key."""
@@ -450,7 +477,6 @@ class SecureConnection:
         iv = cipher.iv
         ciphertext = cipher.encrypt(pad(message, AES.block_size)) # AES encryption
         hmac = HMAC.new(hmac_key, ciphertext, SHA256).digest()
-        #print(iv.hex(), ciphertext.hex(), hmac.hex())
         
         return iv + ciphertext + hmac
 

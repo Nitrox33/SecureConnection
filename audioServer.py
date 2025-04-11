@@ -1,90 +1,181 @@
-from connection import SecureConnection, Client
-import time
-import threading
+from connection import SecureConnection, Client, MAX_MESSAGE_SIZE
+from chat import ask_while_valid
 from prompt_toolkit import PromptSession
 from prompt_toolkit.patch_stdout import patch_stdout
 import colorama
-import os
+import logging 
+import pyaudio # for audio input/output
+import struct # for struct.unpack
+import zlib # to compress the audio, not the best but works
+import time
+import threading
+
 colorama.init(autoreset=True)
-import string
-import logging
-from chat import ask_while_valid
-from connection import MAX_MESSAGE_SIZE
-import pyaudio
-import wave
 
-received_buffer: list[bytes] = []
-RATE = 44000
-CHUNK = 1024
-CHANNELS = 1
-FORMAT = pyaudio.paInt16 # 16-bit PCM
+class SecureAudio(SecureConnection):
+    def __init__(self,host='localhost', port=12345, verbose=False, logging_path=None) -> None:     
+        super().__init__(host, port, verbose, logging_path)
+        self.received_buffer: list = []
+        
+        self.RATE: int = 44100 # Sample rate (44.1 kHz)
+        self.CHANNELS: int = 1 # 1 channel for mono audio
+        self.CHUNK: int = 1024 # 1024 samples per buffer (at 44.1 kHz, this is 23 ms)
+        self.FORMAT: int  = pyaudio.paInt16 # 16-bit PCM (2 bytes per sample)
 
-def handle_client_message(server: SecureConnection, message: bytes, client: Client) -> None:
+        self.TIME_PER_CHUNK: float = self.CHUNK / self.RATE # 0.023 time per chunk in seconds
+        
+        self.muted = False # if True the mic wron't send audio to the server
+        self.play = False # if True the server will play the audio received from the clients
+        
+        self.input_device_index: int = 0
+        self.output_device_index: int = 0
+
+def handle_client_message(server: SecureAudio, message: bytes, client: Client) -> None:
     """Handles incoming messages from clients."""
-    received_buffer.append(message)
-    
-def play_audio(connection: SecureConnection) -> None:
+    if message.startswith(b"/message"):
+        print(message[9:]) # print the rest
+        return
+    if len(client.input_buffer) > 20:
+        return
+    client.input_buffer.append(message) # add the message to the input buffer
+
+def play_audio(connection: SecureAudio) -> None:
     """Plays audio from a list of chunks."""
     p = pyaudio.PyAudio()
-    stream = p.open(format=FORMAT,
-                    channels=CHANNELS,
-                    rate=RATE,
+    stream = p.open(format=connection.FORMAT,
+                    channels=connection.CHANNELS,
+                    rate=connection.RATE,
                     output=True)
     
     while True and connection.is_connected():
-        if not received_buffer:
+        latest_chunks = []
+        for client in connection.clients:
+            if client.input_buffer:
+                if len(client.input_buffer) > 3:
+                    client.input_buffer.pop(0)
+                data = zlib.decompress(client.input_buffer.pop(0)) # decompress the audio data
+                latest_chunks.append(data)
+        if not latest_chunks:
+            time.sleep(0.01)
             continue
-        stream.write(received_buffer[0])
-        received_buffer.pop(0)
+        chunk = mix_frames_bytes(latest_chunks) # mix the chunks
+        stream.write(chunk)
     
     stream.stop_stream()
     stream.close()
     p.terminate()
 
+def mix_frames_bytes(frames: list[bytes]) -> bytes:
+    """
+    Mixes multiple PCM audio frames (in bytes) into a single audio frame by summing corresponding samples.
 
-def server_mode(ip: str, port: int, device_index: int) -> None:
-    SERVER = SecureConnection(host=ip, port=port, verbose=False)
-    SERVER.start_server(thread=True)
-    SERVER.handle_client_function = handle_client_message
-    play_thread = threading.Thread(target=play_audio, args=(SERVER,))
+    Args:
+        frames (List[bytes]): A list of audio frames in bytes, where each frame is raw 16-bit PCM data.
+
+    Returns:
+        bytes: A mixed audio frame in raw 16-bit PCM format.
+    """
+    if not frames:
+        return b''
+
+    frame_length = len(frames[0])
+    num_samples = frame_length // 2  # Each sample is 2 bytes (16-bit)
+
+    # Unpack all frames into lists of integers
+    unpacked_frames = [list(struct.unpack('<' + 'h' * num_samples, f)) for f in frames]
+
+    # Mix the frames
+    mixed = [0] * num_samples
+    for frame in unpacked_frames:
+        for i in range(num_samples):
+            mixed[i] += frame[i]
+
+    # Clamp to 16-bit PCM range
+    clamped = [max(min(sample, 32767), -32768) for sample in mixed]
+
+    # Pack back into bytes
+    return struct.pack('<' + 'h' * num_samples, *clamped)
+
+def server_mode(ip: str, port: int, device_index: int) -> None: # todo index_device
+    server = SecureAudio(host=ip, port=port, verbose=False, logging_path=None)
+    server.start_server(thread=True)
+    server.handle_client_function = handle_client_message
+    play_thread = threading.Thread(target=play_audio, args=(server,))
     play_thread.start()
-    while True:
-        try:
-            time.sleep(1)
-        except KeyboardInterrupt:
-            SERVER.stop_server()
-            return
+    session = PromptSession()
+    try:
+        with patch_stdout(True):
+            while True:
+                text: str = session.prompt("> ") # waiting for commands
+                if text.startswith("/help"):
+                    print("this is the help panel")
+                
+    except KeyboardInterrupt:
+        server.stop_server()
+        return
 
 def client_mode(ip: str, port: int, device_index: int) -> None:
-    com = SecureConnection(host=ip, port=port, verbose=False)
+    com = SecureAudio(host=ip, port=port, verbose=False, logging_path=None)
     com.connect()
-    com.start_listener(lambda audio: received_buffer.append(audio))
-    print("launching audio thread")
-    record_thread = threading.Thread(target=record_and_send_audio, args=(com, device_index,))
-    record_thread.start()
-    while True:
-        try:
-            time.sleep(1)
-        except KeyboardInterrupt:
-            print("\nStopping client...")
-            com.disconnect()
-            return
+    com.input_device_index = device_index # add the input device to the server object
+    com.start_listener(lambda audio: com.received_buffer.append(audio))
+    start_record_and_send_thread(com)
+    session = PromptSession()
+    try:
+        with patch_stdout(True):
+            while True:
+                text: str = session.prompt("> ") # waiting for commands
+                if text:
+                    if text.startswith("/mute"):
+                        com.muted = True
+                    elif text.startswith("/unmute"):
+                        com.muted = False
+                    elif text.startswith("/reconnect"):
+                        com.disconnect()
+                        com.connect()
+                        com.start_listener(lambda audio: com.received_buffer.append(audio))
+                        start_record_and_send_thread(com)
 
-def record_and_send_audio(connection: SecureConnection, device_index: int) -> None:
+                    else:
+                        com.send(b'/message ' + text.encode())
+                    
+                        
+    except KeyboardInterrupt:
+        print("\nStopping client...")
+        com.disconnect()
+        return
+
+def start_record_and_send_thread(connection: SecureAudio) -> None:
+    print("launching audio thread")
+    record_thread = threading.Thread(target=record_and_send_audio, args=(connection,))
+    record_thread.start()
+
+def record_and_send_audio(connection: SecureAudio) -> None:
     """Records audio and sends it to the server."""
     p = pyaudio.PyAudio()
-    
-    stream = p.open(format=FORMAT,
-                    channels=CHANNELS,
-                    rate=RATE,
+    stream = p.open(format=connection.FORMAT,
+                    channels=connection.CHANNELS,
+                    rate=connection.RATE,
                     input=True,
-                    input_device_index=device_index,
-                    frames_per_buffer=CHUNK)
+                    input_device_index=connection.input_device_index,
+                    frames_per_buffer=connection.CHUNK)
     
+    print("thread launched")
     while True and connection.is_connected():
-        data = stream.read(CHUNK) # each chunk is 1024 * 2 = 2048 (because of 16-bit PCM) bytes
-        connection.send(data)
+        data = stream.read(connection.CHUNK) # if each chunk is 1024 * 2 = 2048 bytes (because of 16-bit PCM that is 2 bytes per sample)
+        if not connection.muted:
+            try:
+                cdata = zlib.compress(data) # compress the audio data
+                logging.debug(f"Sending audio data to server: {len(cdata)} bytes")
+                connection.send(cdata)
+            except TimeoutError:
+                print("Timeout error: Server not responding")
+                continue
+            except ConnectionResetError:
+                print("Connection reset error: Server not responding")
+                break
 
+    print("Stopping audio stream...")
     stream.stop_stream()
     stream.close()
     p.terminate()
@@ -100,9 +191,9 @@ def choose_microphone():
         if p.get_device_info_by_host_api_device_index(0, i).get('maxInputChannels') > 0:
             print(f"{i}: {p.get_device_info_by_host_api_device_index(0, i).get('name')}")
     
-    device_index = int(input("Select a microphone by index: "))
+    device_index = int(input("Select a microphone by index: ") or 0)
     return device_index
- 
+
 def main():
     mode = ask_while_valid("Enter 's' for server or 'c' for client: ", ['s', 'c'])
     ip = input("Enter the IP address (leave empty for localhost): ") or "localhost"
@@ -110,8 +201,7 @@ def main():
     device_index = choose_microphone()
     if mode == 's':
         logging.basicConfig(
-            filename='chat.log',
-            level=logging.INFO,
+            level=logging.DEBUG,
             format='%(asctime)s %(levelname)s: %(message)s'
         )
         server_mode(ip, port, device_index)

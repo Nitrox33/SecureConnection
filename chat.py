@@ -75,7 +75,7 @@ def handle_client_message(server: SecureConnection, message: bytes, client: Clie
             server.send(f"Invalid color. Available colors: red, green, blue, yellow, cyan, magenta".encode(), client=client)
             return
         
-    if message.startswith(b"/help"): # todo: add help message
+    if message.startswith(b"/help"):
         help_message = (
             "/name <name> - Set your name\n"
             "/color <color> - Set your name color (red, green, blue, yellow, cyan, magenta)\n"
@@ -150,7 +150,7 @@ def client_mode(ip: str, port: int) -> None:
                     print(f"Sending {len(input_message)/1024/1024:.2f} MB")
                 elif input_message.startswith("/upload"):
                     try:
-                        file_path = input_message[7:]
+                        file_path = input_message[8:]
                         upload_file(file_path, com)
                     except IndexError:
                         print("Usage: /upload <file_path>")
@@ -185,8 +185,7 @@ def main():
     
     if mode == 's':
         logging.basicConfig(
-            filename='chat.log',
-            level=logging.INFO,
+            level=logging.DEBUG,
             format='%(asctime)s %(levelname)s: %(message)s'
         )
         server_mode(ip, port)
