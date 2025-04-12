@@ -1,6 +1,5 @@
 import asyncio
 import socket
-import threading
 from Crypto.PublicKey import RSA
 from Crypto.Cipher import PKCS1_OAEP # for RSA encryption/decryption
 from Crypto.Cipher import AES # for after the RSA key exchange
@@ -8,16 +7,8 @@ from Crypto.Random import get_random_bytes
 from Crypto.Util.Padding import pad, unpad
 from Crypto.Hash import HMAC
 from Crypto.Hash import SHA256
-from Crypto.Protocol.KDF import scrypt
-from sys import getsizeof
 import logging 
-from concurrent.futures import ProcessPoolExecutor
 from connection import Client, key_derivation
-
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
 
 
 class AsyncioSecureConnection:
@@ -25,7 +16,8 @@ class AsyncioSecureConnection:
     A class to handle secure connections using asyncio and socket.
     This class is designed to work with asyncio for asynchronous I/O operations.
     """
-    def __init__(self, host: str = '127.0.0.1', port: int = 8888):
+    def __init__(self, host: str = '127.0.0.1', port: int = 8888, verbose = False):
+        self.verbose = verbose
         self.host = host
         self.port = port
         self.socket = None # the main socket for the server
@@ -41,15 +33,17 @@ class AsyncioSecureConnection:
         self.hmac_key = None
         
         self.handle_client_function: callable = None # callback function to handle the client messages, must take 3 arguments: the AsyncioSecureConnection self, the message and the client object
-        self.handle_server_function: callable = None # callback function to handle the server messages, must take 2 arguments: the AsyncioSecureConnection self and the message
+        self.receiver_function: callable = None # callback function to handle the server messages, must take 2 arguments: the AsyncioSecureConnection self and the message
 
     def create_server_socket(self):
+        """Create a server socket and bind it to the specified host and port."""
+        logging.info(f"Creating server socket on {self.host}:{self.port}...")
         self.is_server = True
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.socket.bind((self.host, self.port))
         self.generate_rsa_key()
-        self.socket.listen()
+        self.socket.listen(5)
         self.socket.setblocking(False)  # Must set to non-blocking mode
 
     def generate_rsa_key(self, size: int = 2048, save: bool = False) -> None:
@@ -92,10 +86,9 @@ class AsyncioSecureConnection:
                 if not message:
                     logging.info(f"Client {client.ip}:{client.port} disconnected.")
                     break
-                await self.send(message, client=client, encrypted=True)  # echo back the message to the client
                 if self.handle_client_function:
                     # the user can handle the client function as a callback function
-                    self.handle_client_function(self, message, client)
+                    await self.handle_client_function(self, message, client)
                 else:
                     logging.info(f"Received message from client {client.ip}:{client.port}: {message}")
                     logging.debug(f"Sending message to client {client.ip}:{client.port}: {message}")
@@ -118,6 +111,7 @@ class AsyncioSecureConnection:
         loop = asyncio.get_running_loop()
         while True:
             # Accept a new connection asynchronously.
+            logging.debug("Waiting for incoming connections...")
             client_sock, addr = await loop.sock_accept(self.socket)
 
             current_client = Client(client_sock)
@@ -153,6 +147,7 @@ class AsyncioSecureConnection:
             # Create and schedule a new asyncio task to handle the connection.
             logging.debug(f"Creating task for client {current_client.ip}:{current_client.port}...")
             asyncio.create_task(self.handle_client(current_client))
+            logging.info(f"Client {current_client.ip}:{current_client.port} connected.")
 
     async def send(self, message: bytes, client: Client = None, encrypted: bool = True):
         """
@@ -164,9 +159,10 @@ class AsyncioSecureConnection:
 
         if self.is_server:
             if not client:
+                mesg_to_send = message
                 for client in self.clients:
                     if encrypted:
-                        message = self.encrypt_aes_and_hmac(message, client.aes_key, client.hmac_key)
+                        message = self.encrypt_aes_and_hmac(mesg_to_send, client.aes_key, client.hmac_key)
                     header = len(message).to_bytes(4, 'big')
                     await asyncio.get_event_loop().sock_sendall(client.socket, header + message)
             else:
@@ -191,6 +187,7 @@ class AsyncioSecureConnection:
                 client_socket = self.clients[-1].socket if self.clients else None  # get the last client socket
                 aes_key, hmac_key = self.clients[-1].aes_key, self.clients[-1].hmac_key
             elif self.is_client:
+                logging.debug("Receiving data from server...")
                 client_socket = self.socket
                 aes_key, hmac_key = self.aes_key, self.hmac_key
         else:
@@ -222,7 +219,7 @@ class AsyncioSecureConnection:
                     data = self.decrypt_aes_and_hmac(data, aes_key, hmac_key)
                 return data
             except (ConnectionError) as e:
-                raise ConnectionError("Client disconnected" + str(e))
+                raise ConnectionError(f"Client disconnected {e}")
             except (ValueError) as e:
                 logging.error(f"Error receiving data: {e}")
                 return None
@@ -291,13 +288,12 @@ class AsyncioSecureConnection:
         while self.is_connected():
             try:
                 message = await self.recv(encrypted=True)  # receive data from the server
-                if message and self.handle_server_function:
-                    self.handle_server_function(message)  # call the provided function with the received message
+                logging.debug(f"Received message from server: {message}")
+                if message and self.receiver_function:
+                    await self.receiver_function(self, message)  # call the provided function with the received message
                 elif message:
                     logging.info(f"Received message from server: {message}")
-                else:
-                    logging.error("No message received.")
-                    break
+
             except Exception as e:
                 logging.error(f"Error receiving data: {e}")
                 break
