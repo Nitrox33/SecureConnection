@@ -95,7 +95,6 @@ async def server_mode(ip: str, port: int) -> None:
                 elif message.startswith("/name"):
                     name = message.split(" ")[1]
                 elif message.startswith("/info"):
-                    print(asyncio.all_tasks())
                     print(f"Server IP: {ip}, Port: {port}")
                     print(f"Connected clients: {len(server.clients)}")
                     print("Client list:")
