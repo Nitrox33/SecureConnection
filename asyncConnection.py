@@ -34,6 +34,7 @@ class AsyncioSecureConnection:
         
         self.handle_client_function: callable = None # callback function to handle the client messages, must take 3 arguments: the AsyncioSecureConnection self, the message and the client object
         self.receiver_function: callable = None # callback function to handle the server messages, must take 2 arguments: the AsyncioSecureConnection self and the message
+        self.on_exit_function: callable = None # callback function to handle the exit of the server, must take 2 argument: the AsyncioSecureConnection self and the client object
 
     def create_server_socket(self):
         """Create a server socket and bind it to the specified host and port."""
@@ -45,6 +46,7 @@ class AsyncioSecureConnection:
         self.generate_rsa_key()
         self.socket.listen(5)
         self.socket.setblocking(False)  # Must set to non-blocking mode
+
 
     def generate_rsa_key(self, size: int = 2048, save: bool = False) -> None:
         """Generate an RSA key pair."""
@@ -66,7 +68,8 @@ class AsyncioSecureConnection:
         self.is_server = False
         for client in self.clients:
             client.socket.close()
-        self.socket.close()
+        if self.socket:
+            self.socket.close()
         self.clients.clear()  # Clear the list of clients
         self.socket = None  # Clear the server socket
         logging.info("Server stopped and all client connections closed.")
@@ -94,6 +97,8 @@ class AsyncioSecureConnection:
                     logging.debug(f"Sending message to client {client.ip}:{client.port}: {message}")
                     await self.send(b"Message received!", encrypted=True, client=client)
 
+        except asyncio.CancelledError:
+            logging.info(f"Task for client {client.ip}:{client.port} cancelled.")
         except ConnectionError:
             logging.info(f"Client {client.ip}:{client.port} disconnected.")
         except Exception as e:
@@ -102,6 +107,8 @@ class AsyncioSecureConnection:
             client.socket.close()
             if client in self.clients:
                 self.clients.remove(client)
+            if self.on_exit_function:
+                await self.on_exit_function(self, client)
             logging.debug(f"Task for client {client.ip}:{client.port} stopped.")
 
     async def handle_connections(self):
@@ -109,45 +116,51 @@ class AsyncioSecureConnection:
         Accepts incoming connections and creates a new task for each client.
         """
         loop = asyncio.get_running_loop()
-        while True:
-            # Accept a new connection asynchronously.
-            logging.debug("Waiting for incoming connections...")
-            client_sock, addr = await loop.sock_accept(self.socket)
+        try:
+            while self.is_connected():
+                # Accept a new connection asynchronously.
+                logging.debug("Waiting for incoming connections...")
+                client_sock, addr = await loop.sock_accept(self.socket)
 
-            current_client = Client(client_sock)
-            self.clients.append(current_client)
-            try:
-                await self.send(self.public_key.export_key(format="DER"), client=current_client, encrypted=False)  # send public key to client    
-                self.server_salt = get_random_bytes(8)  # generate a random salt for the server
-                await self.send(self.server_salt, client=current_client, encrypted=False)  # send server's salt to client
+                current_client = Client(client_sock)
+                self.clients.append(current_client)
+                try:
+                    await self.send(self.public_key.export_key(format="DER"), client=current_client, encrypted=False)  # send public key to client    
+                    self.server_salt = get_random_bytes(8)  # generate a random salt for the server
+                    await self.send(self.server_salt, client=current_client, encrypted=False)  # send server's salt to client
 
-                # ---- receiving data from the client ----
-                logging.debug(f"Waiting for client {current_client.ip}:{current_client.port} to send main key and salt...")
-                r_key_encrypted = await self.recv(encrypted=False, client=current_client)  # receive main_key from client
-                client_salt_encrypted = await self.recv(encrypted=False, client=current_client)  # receive client salt
-                logging.debug(f"Received main key and client salt from client {current_client.ip}:{current_client.port}")
+                    # ---- receiving data from the client ----
+                    logging.debug(f"Waiting for client {current_client.ip}:{current_client.port} to send main key and salt...")
+                    r_key_encrypted = await self.recv(encrypted=False, client=current_client)  # receive main_key from client
+                    client_salt_encrypted = await self.recv(encrypted=False, client=current_client)  # receive client salt
+                    logging.debug(f"Received main key and client salt from client {current_client.ip}:{current_client.port}")
 
-                # ---- decrypting the main key ----
-                logging.debug(f"Decrypting main key with private key...")
-                main_key = self.decrypt_rsa(r_key_encrypted)  # decrypt the main_key with private key
-                self.client_salt = self.decrypt_rsa(client_salt_encrypted)  # decrypt the client salt with private key
-                logging.debug(f"Decrypted main key: {main_key.hex()[:8]}...")
+                    # ---- decrypting the main key ----
+                    logging.debug(f"Decrypting main key with private key...")
+                    main_key = self.decrypt_rsa(r_key_encrypted)  # decrypt the main_key with private key
+                    self.client_salt = self.decrypt_rsa(client_salt_encrypted)  # decrypt the client salt with private key
+                    logging.debug(f"Decrypted main key: {main_key.hex()[:8]}...")
 
-                # ---- key derivation ----
-                logging.debug(f"Deriving keys from main key...")
-                aes_key, hmac_key = key_derivation(main_key, self.server_salt, self.client_salt)  # derive keys from main key and salts
-                current_client.aes_key, current_client.hmac_key = aes_key, hmac_key  # derive a key from the AES key and server's salt
-            
-            except Exception as e:
-                logging.error(f"Error during key exchange with {current_client.ip}:{current_client.port}: {e}")
-                client_sock.close()
-                self.clients.remove(current_client)
+                    # ---- key derivation ----
+                    logging.debug(f"Deriving keys from main key...")
+                    aes_key, hmac_key = key_derivation(main_key, self.server_salt, self.client_salt)  # derive keys from main key and salts
+                    current_client.aes_key, current_client.hmac_key = aes_key, hmac_key  # derive a key from the AES key and server's salt
+                
+                except Exception as e:
+                    logging.error(f"Error during key exchange with {current_client.ip}:{current_client.port}: {e}")
+                    client_sock.close()
+                    self.clients.remove(current_client)
 
 
-            # Create and schedule a new asyncio task to handle the connection.
-            logging.debug(f"Creating task for client {current_client.ip}:{current_client.port}...")
-            asyncio.create_task(self.handle_client(current_client))
-            logging.info(f"Client {current_client.ip}:{current_client.port} connected.")
+                # Create and schedule a new asyncio task to handle the connection.
+                logging.debug(f"Creating task for client {current_client.ip}:{current_client.port}...")
+                asyncio.create_task(self.handle_client(current_client))
+                logging.info(f"Client {current_client.ip}:{current_client.port} connected.")
+        except asyncio.CancelledError:
+            logging.info("Server stopped accepting new connections.")
+        except Exception as e:
+            logging.error(f"Error accepting connections: {e}")
+            self.stop_server()
 
     async def send(self, message: bytes, client: Client = None, encrypted: bool = True):
         """
@@ -158,7 +171,7 @@ class AsyncioSecureConnection:
             return
 
         if self.is_server:
-            if not client:
+            if not client: # if no client is specified, send to all clients
                 mesg_to_send = message
                 for client in self.clients:
                     if encrypted:
@@ -187,7 +200,6 @@ class AsyncioSecureConnection:
                 client_socket = self.clients[-1].socket if self.clients else None  # get the last client socket
                 aes_key, hmac_key = self.clients[-1].aes_key, self.clients[-1].hmac_key
             elif self.is_client:
-                logging.debug("Receiving data from server...")
                 client_socket = self.socket
                 aes_key, hmac_key = self.aes_key, self.hmac_key
         else:
@@ -230,51 +242,57 @@ class AsyncioSecureConnection:
         Connect to the server as a client.
         This function will perform the key exchange and establish a secure connection.
         """
-        if self.is_client:
-            logging.error("Already connected as a client.")
-            return
-        if self.is_server:
-            logging.error("Already connected as a server.")
-            return
-        
-        loop = asyncio.get_event_loop()
+        try:
+            if self.is_client:
+                logging.error("Already connected as a client.")
+                return
+            if self.is_server:
+                logging.error("Already connected as a server.")
+                return
+            
+            loop = asyncio.get_event_loop()
 
-        # ----- create a socket and connect to the server ----
-        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM) # create a TCP socket
-        self.socket.setblocking(False)
+            # ----- create a socket and connect to the server ----
+            self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM) # create a TCP socket
+            self.socket.setblocking(False)
 
-        await loop.sock_connect(self.socket, (self.host, self.port))  # connect to the server
-        logging.info(f"Connected to {self.host}:{self.port}, exchanging keys...")
-        
-        self.is_client = True
-        
-        # ----- receiving data from the server ----
-        logging.debug("Receiving public key and salt from server...")
-        pub_key = await self.recv(encrypted=False)  # receive server's public key
-        self.public_key = RSA.import_key(pub_key)
-        self.server_salt = await self.recv(encrypted=False) # receive server's salt
-        logging.debug(f"Received public key and salt from server: {self.server_salt.hex()}")
-        
-        # ---- sending data to the server ----
-        logging.debug("Sending main key and salt to server...")
-        main_key= get_random_bytes(16)  # generate a random main key
-        main_key_encrypted = self.encrypt_rsa(main_key)  # encrypt the main key with server's public key
-        await self.send(main_key_encrypted, encrypted=False) 
-        self.client_salt = get_random_bytes(8)  # generate a random salt for the client
-        client_salt_encrypted = self.encrypt_rsa(self.client_salt)
-        await self.send(client_salt_encrypted, encrypted=False)  # send the client salt to the server
-        logging.debug(f"Sent main key and salt to server: {self.client_salt.hex()}")
+            await loop.sock_connect(self.socket, (self.host, self.port))  # connect to the server
+            logging.info(f"Connected to {self.host}:{self.port}, exchanging keys...")
+            
+            self.is_client = True
+            
+            # ----- receiving data from the server ----
+            logging.debug("Receiving public key and salt from server...")
+            pub_key = await self.recv(encrypted=False)  # receive server's public key
+            self.public_key = RSA.import_key(pub_key)
+            self.server_salt = await self.recv(encrypted=False) # receive server's salt
+            logging.debug(f"Received public key and salt from server: {self.server_salt.hex()}")
+            
+            # ---- sending data to the server ----
+            logging.debug("Sending main key and salt to server...")
+            main_key= get_random_bytes(16)  # generate a random main key
+            main_key_encrypted = self.encrypt_rsa(main_key)  # encrypt the main key with server's public key
+            await self.send(main_key_encrypted, encrypted=False) 
+            self.client_salt = get_random_bytes(8)  # generate a random salt for the client
+            client_salt_encrypted = self.encrypt_rsa(self.client_salt)
+            await self.send(client_salt_encrypted, encrypted=False)  # send the client salt to the server
+            logging.debug(f"Sent main key and salt to server: {self.client_salt.hex()}")
 
-        # ---- key derivation ----
-        logging.debug(f"Deriving keys from main key...")
-        self.aes_key, self.hmac_key = key_derivation(main_key, self.server_salt, self.client_salt)  # derive a key from the AES key and server's saltr
-        logging.debug(f"Derived keys: aes_key: {self.aes_key.hex()[:8]}... hmac_key: {self.hmac_key.hex()[:8]}...")
-        logging.info(f"Client connected to server at {self.host}:{self.port}")
+            # ---- key derivation ----
+            logging.debug(f"Deriving keys from main key...")
+            self.aes_key, self.hmac_key = key_derivation(main_key, self.server_salt, self.client_salt)  # derive a key from the AES key and server's saltr
+            logging.debug(f"Derived keys: aes_key: {self.aes_key.hex()[:8]}... hmac_key: {self.hmac_key.hex()[:8]}...")
+            logging.info(f"Client connected to server at {self.host}:{self.port}")
 
-        if start_receiver:
-            # Start the receiver task if requested.
-            logging.debug("Starting receiver task...")
-            asyncio.create_task(self.receiver())
+            if start_receiver:
+                # Start the receiver task if requested.
+                logging.debug("Starting receiver task...")
+                asyncio.create_task(self.receiver())
+        except Exception as e:
+            logging.error(f"Error connecting to server: {e}")
+            if self.socket:
+                self.socket.close()
+                self.socket = None
 
     async def receiver(self) -> None:
         """
@@ -297,6 +315,8 @@ class AsyncioSecureConnection:
             except Exception as e:
                 logging.error(f"Error receiving data: {e}")
                 break
+    
+        self.is_client = False  # Keep the client connected
         logging.debug("Receiver task stopped.")
 
     def encrypt_rsa(self, message: bytes) -> bytes:
@@ -375,7 +395,4 @@ async def main():
         logging.info("Server socket closed.")
 
 if __name__ == '__main__':
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logging.info("Server stopped by user.")
+    asyncio.run(main())

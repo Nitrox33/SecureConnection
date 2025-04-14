@@ -56,12 +56,13 @@ class Client: # Client class to handle client management in the server
         Args:
             socket (socket.socket): The socket associated with the client connection.
         """
-        self.name = None
+        self.name: str = None
         self.name_color: str = None
         
         self.ip = socket.getpeername()[0]
         self.port = socket.getpeername()[1]
         self.socket = socket
+        self.udp_socket = None # udp socket for the client
         
         self.aes_key = None
         self.hmac_key = None
@@ -70,7 +71,7 @@ class Client: # Client class to handle client management in the server
         self.input_buffer: list[bytes] = []
         
     def __repr__(self):
-        return f"client {self.ip}:{self.port} --- aes_key: {self.aes_key.hex() if self.aes_key else 'None'} --- hmac_key: {self.hmac_key.hex() if self.hmac_key else 'None'}"
+        return f"client {self.ip}:{self.port} - id {self.id}"
 
 class SecureConnection:
     def __init__(self, host='localhost', port=12345, verbose=False, logging_path=None):
@@ -79,6 +80,7 @@ class SecureConnection:
         self.host = host
         self.port = port
         self.socket = None
+        self.udp_socket = None
         self.verbose = verbose
         
         self.is_server = False
@@ -195,21 +197,35 @@ class SecureConnection:
         self.socket.listen(5)
         self.is_server = True
         if thread:
-            logging.info("Starting client manager thread...")
-            self.threads.append(threading.Thread(target=self.client_manager))
-            self.threads[-1].start()
-                    
-    def client_manager(self) -> None:
+            self.start_client_manager_thread()
+
+    def start_client_manager_thread(self, thread=True) -> None:
+        logging.debug("Starting client manager thread...")
+        """Start the client manager thread."""
+        if not self.is_server:
+            logging.error("Server is not running.")
+            return
+        self.threads.append(threading.Thread(target=self.client_manager, args=(thread,)))
+        self.threads[-1].start()
+        logging.debug("Client manager thread started.")
+
+    def client_manager(self, thread=True) -> None:
         """
         This function will run in a separate thread to manage client connections.
         It will accept client connections and start a new thread for each client.
+
+        the client manager will also check for stopped threads and remove them from the list of threads.
         """
         if not self.is_server:
             logging.error("Server is not running.")
             return
         while True and self.is_server:
             try:
-                self.accept_client(thread=True)  # accept a client connection
+                for thread in self.threads:
+                    if not thread.is_alive():
+                        self.threads.remove(thread)  # remove the thread from the list if it is not alive
+
+                self.accept_client(thread=thread)  # accept a client connection
             except socket.timeout:
                 continue
             except KeyboardInterrupt:
@@ -289,7 +305,7 @@ class SecureConnection:
         This function will run in a separate thread for each client.
         """
         logging.debug(f"Thread for client {current_client.ip}:{current_client.port} Started.")
-        while True and self.is_server:
+        while True and self.is_server and current_client in self.clients:
             try:
                 # --- receive data from the client ---
                 message = self.recv(client=current_client, encrypted=True)
@@ -511,7 +527,61 @@ class SecureConnection:
             return decrypted_message
         except ValueError:
             raise ValueError("Decryption failed.")
+
+    def create_udp_socket(self) -> None:
+        """Create a UDP socket."""
+        if self.udp_socket:
+            logging.error("UDP socket already created.")
+            return
+        self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.udp_socket.bind((self.host, self.port))
+        logging.info(f"UDP socket created on {self.host}:{self.port}.")
+
+    # ---- UDP functions ----
+
+    def connect_udp(self, host: str, port: int) -> None:
+        """Connect to a UDP socket."""
+        if not self.udp_socket:
+            logging.error("UDP socket not created.")
+            return
+        self.udp_socket.connect((host, port))
+        logging.info(f"Connected to UDP socket {host}:{port}.")
+
+    def send_udp(self, message: bytes, encrypted: bool = True) -> None:
+        """Send a message over UDP."""
+        if not self.udp_socket:
+            logging.error("UDP socket not created.")
+            return
+        if encrypted:
+            message = self.encrypt_aes_and_hmac(message, self.aes_key, self.hmac_key)
+        header = len(message).to_bytes(4, 'big')
+        self.udp_socket.sendall(header + message) # send the message with the header
+
+    def recv_udp(self, encrypted: bool = True) -> bytes:
+        """Receive a message over UDP."""
+        if not self.udp_socket:
+            logging.error("UDP socket not created.")
+            return None
+        header = self.udp_socket.recv(4)
+        if not header:
+            raise ConnectionError("Socket closed or no data received.")
+        message_length = int.from_bytes(header, 'big')
+        data = b""
+        while len(data) < message_length:
+            size =  message_length - len(data)
+            chunk = self.udp_socket.recv(size)
+            if not chunk:
+                raise ConnectionError("Socket closed during message reception.")
+            data += chunk
         
+        if len(data) != message_length:
+            logging.error(f"Received incomplete message: {len(data)} bytes instead of {message_length} bytes.")
+            raise ValueError("Incomplete message received.")
+        
+        if encrypted:
+            data = self.decrypt_aes_and_hmac(data, self.aes_key, self.hmac_key)
+        return data
+
     def __repr__(self):
         return f"SecureConnection(aes_key={self.aes_key.hex() if self.aes_key else None}, hmac_key={self.hmac_key.hex() if self.hmac_key else None})"
      

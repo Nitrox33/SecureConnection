@@ -10,7 +10,7 @@ colorama.init(autoreset=True)
 import logging
 
 logging.basicConfig(
-            level=logging.INFO,
+            level=logging.ERROR,
             format='%(asctime)s %(levelname)s: %(message)s'
         )
 
@@ -50,6 +50,10 @@ async def handle_client_message(server: AsyncioSecureConnection, message: bytes,
 
 async def receiver_function(server: AsyncioSecureConnection, message: bytes) -> None:
     print(f"{colorama.Fore.CYAN}{message.decode()}{colorama.Style.RESET_ALL}")
+    
+async def on_client_exit(server: AsyncioSecureConnection, client: Client) -> None:
+    print(f"{client.name if client.name != "" else client.ip} has left the chat.")
+    await server.send(f"{client.name if client.name != "" else client.ip} has left the chat.".encode())
 
 async def client_mode(ip: str, port: int) -> None:
     client = AsyncioSecureConnection(ip, port)
@@ -81,6 +85,7 @@ async def server_mode(ip: str, port: int) -> None:
     server = AsyncioSecureConnection(ip, port)
     server.create_server_socket()
     server.handle_client_function = handle_client_message
+    server.on_exit_function = on_client_exit
     p = PromptSession()
     asyncio.create_task(server.handle_connections())
     name = "server"
@@ -90,7 +95,7 @@ async def server_mode(ip: str, port: int) -> None:
                 message: str = await p.prompt_async(name + "> ")
                 if message == "":
                     continue
-                if message.lower() == 'exit':
+                if message.startswith('/exit'):
                     break
                 elif message.startswith("/name"):
                     name = message.split(" ")[1]
@@ -100,8 +105,13 @@ async def server_mode(ip: str, port: int) -> None:
                     print("Client list:")
                     for client in server.clients:
                         print(f"{client.ip}:{client.port} - {client.name} - {client.socket} - keys {client.aes_key.hex()[:8]}... {client.hmac_key.hex()[:8]}...")
-                         
-                
+                    continue
+                elif message.startswith("/help"):
+                    print("Available commands:")
+                    print("/help - Show this help message")
+                    print("/info - Show server info")
+                    print("/exit - Exit the server")
+                    continue                
                 await server.send(name.encode() + b"> " + message.encode())
     except KeyboardInterrupt:
         print("\nExiting...")
