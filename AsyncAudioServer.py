@@ -16,7 +16,7 @@ import time
 colorama.init(autoreset=True)
 
 logging.basicConfig(
-            level=logging.DEBUG,
+            level=logging.INFO,
             format='%(asctime)s %(levelname)s: %(message)s'
         )
 
@@ -260,7 +260,7 @@ def mix_frames_bytes(frames: list[bytes]) -> bytes:
     # Pack back into bytes
     return struct.pack('<' + 'h' * num_samples, *clamped)
 
-async def server_mode(ip: str, port: int, input_index: int, outpout_index: int) -> None: # todo index_device
+async def server_mode(ip: str, port: int, input_index: int, output_index: int) -> None: # todo index_device
     server = SecureAudio(host=ip, port=port, verbose=False)
     server.loop = asyncio.get_event_loop()
     server.create_server_socket()
@@ -367,8 +367,13 @@ async def main():
     mode = await asyncio.to_thread(ask_while_valid, "Enter 's' for server or 'c' for client: ", ['s', 'c'])
     ip = await asyncio.to_thread(input, "Enter the IP address (leave empty for localhost): ") or socket.gethostbyname(socket.gethostname())
     port = await asyncio.to_thread(input, "Enter the port (leave empty for 43221): ") or 43221
-    input_index = await asyncio.to_thread(choose_microphone)
-    output_index = await asyncio.to_thread(choose_output_device)
+    if mode == 'c':
+        input_index = await asyncio.to_thread(choose_microphone)
+        output_index = await asyncio.to_thread(choose_output_device)
+    else:
+        input_index = 0
+        output_index = 0
+        
     if mode == 's':
         await server_mode(ip, port, input_index, output_index)
             

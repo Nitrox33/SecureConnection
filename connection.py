@@ -67,6 +67,7 @@ class Client: # Client class to handle client management in the server
         self.aes_key = None
         self.hmac_key = None
 
+        self.valid = False # if the client is valid or not
         self.id: int | None = None # id of the client, used to identify the client in the server
         self.input_buffer: list[bytes] = []
         
