@@ -272,6 +272,27 @@ async def server_mode(ip: str, port: int, input_index: int, output_index: int) -
         with patch_stdout(True):
             while True:
                 text: str = await session.prompt_async("> ") # waiting for commands
+                if text.startswith("/info"):
+                    print(f"Server IP: {ip}, Port: {port}")
+                    print(f"Connected clients: {len(server.clients)}")
+                    print("Client list:")
+                    for client in server.clients:
+                        print(f"{client.ip}:{client.port} - keys {client.aes_key.hex()[:8]}... {client.hmac_key.hex()[:8]}...")
+                    continue
+                if text.startswith("/kick"):
+                    try:
+                        client_ip = text.split(" ")[1]
+                        client_port = int(text.split(" ")[2])
+                        for client in server.clients:
+                            if client.ip == client_ip and client.port == client_port:
+                                server.kick_client(client)
+                                break
+                        else:
+                            print(f"Client {client_ip}:{client_port} not found")
+                            
+                    except Exception as e:
+                        print(f"Error kicking client: {e}")
+                    continue
                 if text.startswith("/help"):
                     print("this is the help panel")
                 

@@ -316,6 +316,15 @@ class AsyncioSecureConnection:
         self.is_client = False  # Keep the client connected
         logging.debug("Receiver task stopped.")
 
+    async def kick_client(self, client: Client) -> None:
+        """Kick a client from the server."""
+        if client in self.clients:
+            client.socket.close()
+            self.clients.remove(client)
+            logging.info(f"Client {client.ip}:{client.port} kicked from the server.")
+        else:
+            logging.error(f"Client {client.ip}:{client.port} not found in the server.")
+
     def encrypt_rsa(self, message: bytes) -> bytes:
         """Encrypt a message using RSA public key."""
         if not self.public_key:
