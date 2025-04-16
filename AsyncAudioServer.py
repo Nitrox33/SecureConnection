@@ -285,7 +285,7 @@ async def server_mode(ip: str, port: int, input_index: int, output_index: int) -
                         client_port = int(text.split(" ")[2])
                         for client in server.clients:
                             if client.ip == client_ip and client.port == client_port:
-                                server.kick_client(client)
+                                await server.kick_client(client)
                                 break
                         else:
                             print(f"Client {client_ip}:{client_port} not found")
