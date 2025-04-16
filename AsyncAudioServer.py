@@ -62,10 +62,10 @@ async def handle_server_message(com: SecureAudio, message: bytes) -> None:
 
 async def mix_multiple_audio(connection: SecureAudio):  # côté serveur
     logging.debug("Starting audio mixing...")
-    try:
-        debug_timing = []
-        target = connection.TIME_PER_CHUNK * 0.8 # 0.8 is a factor to reduce the time per chunk, this is to avoid lag in the audio
-        while connection.is_connected():
+    debug_timing = []
+    target = connection.TIME_PER_CHUNK * 0.8 # 0.8 is a factor to reduce the time per chunk, this is to avoid lag in the audio
+    while connection.is_connected():
+        try:
             t1 = time.perf_counter()
             latest_chunks = []
             # Construire la liste des derniers chunks et les consommer du buffer
@@ -113,12 +113,10 @@ async def mix_multiple_audio(connection: SecureAudio):  # côté serveur
                 debug_timing.pop(0)
             logging.debug(f"Average time per chunk (mix): {sum(debug_timing)/len(debug_timing)*1000} milliseconds, target: {target*1000} milliseconds")
             target += (connection.TIME_PER_CHUNK - sum(debug_timing)/len(debug_timing))*0.1 # wait for the next chunk
+        except Exception as e:
+            logging.error("Error while mixing audio: " + str(e))
+            await asyncio.sleep(0.001)
             
-
-    except asyncio.CancelledError:
-        logging.info("Audio mixing task stopped.")
-    except Exception as e:
-        logging.error(f"Error in audio mixing: {e}")
         
         # connection.received_buffer.append(zlib.compress(chunk)) # add the mixed chunk to the buffer
         # await connection.send(zlib.compress(chunk)) # send the mixed chunk to the server
