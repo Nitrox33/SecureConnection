@@ -16,7 +16,7 @@ import time
 colorama.init(autoreset=True)
 
 logging.basicConfig(
-            level=logging.INFO,
+            level=logging.DEBUG,
             format='%(asctime)s %(levelname)s: %(message)s'
         )
 
@@ -25,15 +25,15 @@ class SecureAudio(AsyncioSecureConnection):
         super().__init__(host, port, verbose)
         self.received_buffer: list = []
         
-        self.RATE: int = 44100 # Sample rate (44.1 kHz)
+        self.RATE: int = 16000 # Sample rate (44.1 kHz)
         self.CHANNELS: int = 1 # 1 channel for mono audio
         self.CHUNK: int = 1024 # 1024 samples per buffer (at 44.1 kHz, this is 23 ms)
         self.FORMAT: int  = pyaudio.paInt16 # 16-bit PCM (2 bytes per sample)
 
-        self.TIME_PER_CHUNK: float = self.CHUNK / self.RATE * 0.8 # 0.023 time per chunk in seconds (test 0.8)
+        self.TIME_PER_CHUNK: float = self.CHUNK / self.RATE # 0.023 time per chunk in seconds (test 0.8)
+        logging.debug(f"Time per chunk: {self.TIME_PER_CHUNK} seconds")
         # 0.8 is a factor to reduce the time per chunk, this is to avoid lag in the audio
 
-        print(f"Time per chunk: {self.TIME_PER_CHUNK} seconds")
         self.muted = False # if True the mic wron't send audio to the server
         self.play = False # if True the server will play the audio received from the clients
         
@@ -63,6 +63,8 @@ async def handle_server_message(com: SecureAudio, message: bytes) -> None:
 async def mix_multiple_audio(connection: SecureAudio):  # côté serveur
     logging.debug("Starting audio mixing...")
     try:
+        debug_timing = []
+        target = connection.TIME_PER_CHUNK * 0.8 # 0.8 is a factor to reduce the time per chunk, this is to avoid lag in the audio
         while connection.is_connected():
             t1 = time.perf_counter()
             latest_chunks = []
@@ -88,7 +90,7 @@ async def mix_multiple_audio(connection: SecureAudio):  # côté serveur
 
             if not latest_chunks:
                 t2 = time.perf_counter()
-                await asyncio.sleep(connection.TIME_PER_CHUNK - (t2-t1)) # wait for a bit if no data
+                await asyncio.sleep(0.001) # wait for a bit if no data
                 continue
 
             chunk = mix_frames_bytes(latest_chunks)  # création du mix global
@@ -103,8 +105,15 @@ async def mix_multiple_audio(connection: SecureAudio):  # côté serveur
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
 
-            t2 = time.perf_counter()
-            await asyncio.sleep(connection.TIME_PER_CHUNK - (t2-t1))
+
+            await asyncio.sleep(target) # wait for a bit to avoid blocking the loop
+            t2= time.perf_counter()
+            debug_timing.append(t2-t1)
+            if len(debug_timing) > 10:
+                debug_timing.pop(0)
+            logging.debug(f"Average time per chunk (mix): {sum(debug_timing)/len(debug_timing)*1000} milliseconds, target: {target*1000} milliseconds")
+            target += (connection.TIME_PER_CHUNK - sum(debug_timing)/len(debug_timing))*0.1 # wait for the next chunk
+            
 
     except asyncio.CancelledError:
         logging.info("Audio mixing task stopped.")
@@ -140,20 +149,32 @@ async def play_audio(connection: SecureAudio) -> None:
                     output_device_index= connection.output_device_index if connection.output_device_index else None,
                     output=True)
     
+    debug_timing = []
+    t1 = time.perf_counter()
     while connection.is_connected():
         if connection.received_buffer:
-            if len(connection.received_buffer) > 2:
+            logging.debug(f"buffer len : {len(connection.received_buffer)}")
+            if len(connection.received_buffer) > 3:
                 n_number_time_too_long += 1
                 if n_number_time_too_long > 5:
                     connection.received_buffer.clear()
                     n_number_time_too_long = 0
+                    continue
                 print("Buffer overflow, dropping oldest chunks")
                 connection.received_buffer.pop(0)
-            data = zlib.decompress(connection.received_buffer.pop(0))
-            logging.debug(f"Playing audio data: {len(data)} bytes")
+            
+            data = await asyncio.get_running_loop().run_in_executor(None, zlib.decompress, connection.received_buffer.pop(0))
             await asyncio.get_running_loop().run_in_executor(None, stream.write, data)
+            t2 = time.perf_counter()
+            debug_timing.append(t2-t1)
+            t1 = time.perf_counter()
+            
+            if len(debug_timing) > 10:
+                debug_timing.pop(0)
+            logging.debug(f"Average time per chunk (playing): {sum(debug_timing)/len(debug_timing)*1000} milliseconds")
+
         else:
-            await asyncio.sleep(0.001)
+            await asyncio.sleep(0.0001)
     
     stream.stop_stream()
     stream.close()
@@ -174,6 +195,8 @@ async def record_and_send_audio(connection: SecureAudio) -> None:
     connection.threshold = 0  # Set a threshold for silence detection
     
     print("Audio thread launched")
+    debug_timing = []
+
     while connection.is_connected():
         # Run the blocking stream.read() in a thread pool so it doesn't block the event loop.
         t1 = time.perf_counter()
@@ -183,12 +206,15 @@ async def record_and_send_audio(connection: SecureAudio) -> None:
         if not connection.muted:
             try:
                 cdata = zlib.compress(data)  # compress the audio data
-                logging.debug(f"Sending audio data to server: {len(cdata)} bytes")
                 if len(cdata) > connection.threshold:
                     await connection.send(cdata)
                     
-        
+                
                 t2 = time.perf_counter()
+                debug_timing.append(t2-t1)
+                if len(debug_timing) > 10:
+                    debug_timing.pop(0)
+                logging.debug(f"Average time per chunk (recording): {sum(debug_timing)/len(debug_timing)*1000} milliseconds")
                 await asyncio.sleep(connection.TIME_PER_CHUNK - (t2-t1)*2)  # wait for the next chunk
 
             except TimeoutError:
@@ -280,7 +306,6 @@ async def client_mode(ip: str, port: int, device_index: int, output_index: int) 
                     elif text.startswith("/unmute"):
                         com.muted = False
                     elif text.startswith("/reconnect"):
-                        com.disconnect()
                         await com.connect(start_receiver=True)
                     elif text.startswith("/threshold"):
                         if hasattr(com, "threshold"):
@@ -299,7 +324,7 @@ async def client_mode(ip: str, port: int, device_index: int, output_index: int) 
                         print("/message <message>: send a message to the server")
 
                     elif text.startswith("/message"):
-                        com.send(b'/message ' + text.encode())
+                        await com.send(text.encode())
                     
                         
     except KeyboardInterrupt:

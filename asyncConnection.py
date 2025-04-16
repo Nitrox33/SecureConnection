@@ -47,7 +47,6 @@ class AsyncioSecureConnection:
         self.socket.listen(5)
         self.socket.setblocking(False)  # Must set to non-blocking mode
 
-
     def generate_rsa_key(self, size: int = 2048, save: bool = False) -> None:
         """Generate an RSA key pair."""
         self.private_key = RSA.generate(size)
@@ -94,7 +93,6 @@ class AsyncioSecureConnection:
                     await self.handle_client_function(self, message, client)
                 else:
                     logging.info(f"Received message from client {client.ip}:{client.port}: {message}")
-                    logging.debug(f"Sending message to client {client.ip}:{client.port}: {message}")
                     await self.send(b"Message received!", encrypted=True, client=client)
 
         except asyncio.CancelledError:
@@ -306,7 +304,6 @@ class AsyncioSecureConnection:
         while self.is_connected():
             try:
                 message = await self.recv(encrypted=True)  # receive data from the server
-                logging.debug(f"Received message from server: {message}")
                 if message and self.receiver_function:
                     await self.receiver_function(self, message)  # call the provided function with the received message
                 elif message:
